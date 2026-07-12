@@ -14,15 +14,23 @@ const path = require('path');
 
 // Minimal .env loader (no dependency). Must run BEFORE requiring the API,
 // because api/server.js reads process.env at import time to build the DB pool.
-const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
-  for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+// Loads .env (gitignored, machine-specific: DATABASE_URL, SESSION_SECRET, ...)
+// first, then .env.shared (tracked — follows the repo to every clone/pull, for
+// values like GROQ_API_KEY that should just work everywhere). Whichever loads
+// first wins on a shared key, so a personal .env value always overrides the
+// tracked default.
+function loadEnvFile(file) {
+  const p = path.join(__dirname, file);
+  if (!fs.existsSync(p)) return;
+  for (const line of fs.readFileSync(p, 'utf8').split('\n')) {
     const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$/);
     if (m && !(m[1] in process.env)) {
       process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
     }
   }
 }
+loadEnvFile('.env');
+loadEnvFile('.env.shared');
 
 const express = require('express');
 const api = require('./api/server'); // the exported Express app (mounts /api internally)

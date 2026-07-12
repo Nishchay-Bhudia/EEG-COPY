@@ -1415,12 +1415,21 @@ function updateBattery(pct) {
 }
 
 // Show the HR/SpO2 vitals cards only when the connected driver streams PPG.
+// Cards start hidden even on a PPG-capable device (Muse) — hasPPG only means
+// the hardware *could* stream heart-rate/SpO2, not that it currently is (no
+// contact, still warming up, etc). Each card is revealed individually the
+// first time onMusePPG actually computes a real value for it, so the UI never
+// shows a stale "—" as if it were a live reading.
 function updateVitalsVisibility(driver) {
-  const show = !!(driver && driver.hasPPG);
   for (const id of ['spo2-card', 'hr-card']) {
     const el = $(id);
-    if (el) el.style.display = show ? '' : 'none';
+    if (el) el.style.display = 'none';
   }
+}
+
+function revealVitalCard(id) {
+  const el = $(id);
+  if (el && el.style.display === 'none') el.style.display = '';
 }
 
 // Generic sink: all drivers funnel decoded µV samples through here.
@@ -1612,7 +1621,7 @@ async function connectBluetooth() {
     bleChannels.length = 0;
     for (let i = 0; i < driver.channelCount; i++) bleChannels.push([]);
     ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
-    latestHeartRate = null; latestSpO2 = null;
+    latestHeartRate = null; latestSpO2 = null; resetPpgSmoothing();
 
     await driver.start(server, { pushSamples, reportBattery: updateBattery });
 
@@ -1773,6 +1782,21 @@ function onBtDisconnected() {
 }
 
 // ── Muse S PPG processing (heart rate + SpO2) ─────────────────────────────────
+// Forehead PPG (no chest strap, no clip) is inherently noisier than a
+// dedicated pulse oximeter — any head movement, jaw tension, or imperfect
+// skin contact shows up as artifact. That's a real hardware/placement limit
+// we can't fully engineer around. But the previous pipeline made it worse:
+// it recomputed on every single BLE notification (many times/second) from a
+// sliding window with no outlier rejection and no temporal smoothing, so one
+// spurious noise-peak could swing the reading by 50+ BPM between frames. The
+// fixes below (detrend, outlier-reject RR intervals, EMA smoothing, throttled
+// recompute) don't require better hardware — they make the estimate honest
+// about what a noisy signal actually supports.
+let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
+const PPG_RECOMPUTE_MS = 1000; // real HR doesn't need updating faster than 1/s
+
+function resetPpgSmoothing() { hrEma = null; spo2Ema = null; lastPpgComputeAt = 0; }
+
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
   // Muse PPG: 2-byte header + 6 samples × 3 bytes uint24 big-endian
@@ -1782,36 +1806,82 @@ function onMusePPG(ev, channel) {
   }
   if (buf.length > PPG_WINDOW_SAMPLES) buf.splice(0, buf.length - PPG_WINDOW_SAMPLES);
 
-  if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES) {
-    latestHeartRate = computeHeartRate(ppgBuf.ir);
-    if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) latestSpO2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
+  const now = performance.now();
+  if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
+    lastPpgComputeAt = now;
+    const rawHr = computeHeartRate(ppgBuf.ir);
+    if (rawHr != null) hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+    latestHeartRate = hrEma;
+
+    if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) {
+      const rawSpo2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
+      if (rawSpo2 != null) spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+      latestSpO2 = spo2Ema;
+    }
+
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl && latestHeartRate != null) { hrEl.textContent = latestHeartRate.toFixed(0); if (hrSt) hrSt.textContent = 'live reading'; }
-    if (spo2El && latestSpO2 != null)   { spo2El.textContent = latestSpO2.toFixed(1);   if (spo2St) spo2St.textContent = 'live reading'; }
+    if (hrEl && latestHeartRate != null) { hrEl.textContent = latestHeartRate.toFixed(0); if (hrSt) hrSt.textContent = 'live reading'; revealVitalCard('hr-card'); }
+    if (spo2El && latestSpO2 != null)   { spo2El.textContent = latestSpO2.toFixed(1);   if (spo2St) spo2St.textContent = 'live reading'; revealVitalCard('spo2-card'); }
   }
 }
 
-/** BPM from PPG IR via threshold peak detection */
+/** BPM from PPG IR: detrend -> smooth -> peak-detect -> outlier-reject RR intervals. */
 function computeHeartRate(signal) {
-  if (signal.length < 64) return null;
-  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
-  const ac = signal.map(v => v - mean);
-  const std = Math.sqrt(ac.reduce((s, v) => s + v * v, 0) / ac.length);
+  if (signal.length < PPG_SAMPLE_RATE * 2) return null;
+
+  // Detrend against a ~1s moving-average baseline instead of one global mean
+  // over the whole 8s window — removes slow drift (breathing, slight movement)
+  // that a single mean can't track.
+  const baseWin = PPG_SAMPLE_RATE;
+  const ac = new Array(signal.length);
+  let baseSum = 0;
+  for (let i = 0; i < signal.length; i++) {
+    baseSum += signal[i];
+    if (i >= baseWin) baseSum -= signal[i - baseWin];
+    const baseline = baseSum / Math.min(i + 1, baseWin);
+    ac[i] = signal[i] - baseline;
+  }
+  // Light smoothing to knock down high-frequency noise before peak-picking.
+  const sm = new Array(ac.length);
+  for (let i = 0; i < ac.length; i++) {
+    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
+    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
+  }
+
+  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
   const thr = std * 0.5;
-  // 0.28 s refractory → supports up to ~214 BPM (covers athletic/stress range)
-  const minDist = Math.round(PPG_SAMPLE_RATE * 0.28);
+  // 0.4 s refractory → max ~150 BPM; this app is for meditation, not sprints,
+  // and capping the search window itself (not just the final result) stops
+  // double-counting one true beat as two spurious close peaks.
+  const minDist = Math.round(PPG_SAMPLE_RATE * 0.4);
   const peaks = []; let lastPeak = -minDist;
-  for (let i = 1; i < ac.length - 1; i++) {
-    if (ac[i] > thr && ac[i] > ac[i - 1] && ac[i] > ac[i + 1] && (i - lastPeak) >= minDist) {
+  for (let i = 1; i < sm.length - 1; i++) {
+    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
       peaks.push(i); lastPeak = i;
     }
   }
-  if (peaks.length < 2) return null;
+  if (peaks.length < 6) return null; // need >=5 RR intervals before trusting an estimate
+
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  const meanRR = rrs.reduce((a, b) => a + b, 0) / rrs.length;
+  const sortedRr = [...rrs].sort((a, b) => a - b);
+  const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+  // Reject any RR interval more than 25% off the median — one artifact peak
+  // shouldn't be able to swing the whole estimate.
+  const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+  if (kept.length < 4) return null;
+
+  const meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+  // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
+  // trigger (e.g. no skin contact) tends to still be irregular even after
+  // outlier-rejection above. Reject if the surviving intervals are still too
+  // scattered (coefficient of variation) rather than reporting a number that
+  // isn't really a heartbeat.
+  const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+  if (rrStd / meanRR > 0.18) return null;
+
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
-  return (hr >= 30 && hr <= 200) ? hr : null;
+  return (hr >= 35 && hr <= 160) ? hr : null;
 }
 
 /** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
@@ -2419,15 +2489,29 @@ function applyReading(r) {
   // ── Signed corroboration folded under the bhūmi ──
   renderCorroboration(r);
 
-  // ── Blood oxygen / heart rate (if device supports) ──
+  // ── Blood oxygen / heart rate — only shown when a reading actually has
+  // this data (real PPG signal, or demo's synthetic vitals); hidden entirely
+  // otherwise rather than sitting there at "—" as if it were live. ──
   const spo2El = $('val-spo2');
   const hrEl = $('val-hr');
   const spo2StatusEl = $('spo2-status');
   const hrStatusEl = $('hr-status');
-  if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
-  if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
-  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? 'live reading' : 'awaiting signal';
-  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? 'live reading' : 'awaiting signal';
+  const spo2Card = $('spo2-card');
+  const hrCard = $('hr-card');
+  if (r.blood_oxygen != null) {
+    if (spo2El) spo2El.textContent = r.blood_oxygen.toFixed(1);
+    if (spo2StatusEl) spo2StatusEl.textContent = 'live reading';
+    if (spo2Card) spo2Card.style.display = '';
+  } else if (spo2Card) {
+    spo2Card.style.display = 'none';
+  }
+  if (r.heart_rate != null) {
+    if (hrEl) hrEl.textContent = r.heart_rate.toFixed(0);
+    if (hrStatusEl) hrStatusEl.textContent = 'live reading';
+    if (hrCard) hrCard.style.display = '';
+  } else if (hrCard) {
+    hrCard.style.display = 'none';
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

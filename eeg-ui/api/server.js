@@ -1384,19 +1384,16 @@ router.post('/ai/start', requireAuth, async (req, res) => {
           role: 'user',
           content: `${context}
 
-Please give me a warm, friendly, and easy-to-understand summary of this EEG session. Cover:
-1. What mental state I was mostly in and what that felt like
-2. How concentrated or focused I was overall
-3. What my Swara (energy channel) tells us about my physiological state
-4. What my Triguna balance reveals about my mind quality
-5. The most interesting pattern or moment in the session
-6. One practical encouragement or actionable takeaway
-
-Write in warm, flowing paragraphs — like a wise friend explaining my brainwaves to me. No bullet points.`,
+Give me a warm, concise summary of this EEG session in 4-6 SHORT sentences
+total (one tight paragraph, under 120 words) — touch on: the mental state I
+was mostly in, how focused I was, what my Swara and Triguna balance suggest,
+and one practical encouragement. Same substance as a full report, just said
+briefly — like a wise friend giving me the headline, not a lecture. No
+bullet points, no headers, no restating these instructions.`,
         },
       ],
       temperature: 0.7,
-      max_tokens: 700,
+      max_tokens: 220,
     });
 
     res.json({
