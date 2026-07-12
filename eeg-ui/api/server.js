@@ -1208,6 +1208,23 @@ If the user's question is NOT related to EEG, brainwaves, meditation, mindfulnes
 "I'm AI Baba, and I can only help you understand your EEG session data. I'm not able to answer questions on other topics — ask me something about your brainwaves or meditation session!"
 Examples of off-topic queries you must refuse: weather, sports, coding help, maths, history, news, personal life advice unrelated to meditation, recipes, jokes, general knowledge questions.`;
 
+const OFF_TOPIC_REPLY = "I'm AI Baba, and I can only help you understand your EEG session data. I'm not able to answer questions on other topics — ask me something about your brainwaves or meditation session!";
+const OFF_TOPIC_REPLY_GU = "હું AI બાબા છું, અને હું ફક્ત તમારા EEG સેશન ડેટા સમજવામાં તમારી મદદ કરી શકું છું. હું અન્ય વિષયો પર પ્રશ્નોના જવાબ આપી શકતો નથી — મને તમારા મગજના તરંગો અથવા ધ્યાન સેશન વિશે કંઈક પૂછો!";
+
+// The app UI has an English/Gujarati toggle (i18n.js) — when the user is in
+// Gujarati mode, AI Baba should answer in Gujarati too, so the experience
+// stays consistent end-to-end rather than only translating chrome around an
+// English AI. Keep Sanskrit/yogic terms (Kshipta, Ekagra, Sattva, ...) as-is
+// even in Gujarati replies — that matches how the rest of the app renders
+// them (Gujarati script alongside the same underlying Sanskrit vocabulary).
+const LANG_INSTRUCTION = {
+  gu: `\n\nIMPORTANT: Respond in Gujarati (ગુજરાતી), written in the Gujarati script. Keep Sanskrit/yogic technical terms (Chitta Bhumi state names like Kshipta/Vikshipta/Ekagra/Niruddha, Swara names like Ida/Pingala/Sushumna, Guna names like Sattva/Rajas/Tamas) recognizable — either in Gujarati transliteration or alongside the Roman term — since these are proper nouns from the tradition, not ordinary vocabulary to translate freely. Numbers, percentages and band names (Alpha/Beta/Theta/Delta/Gamma) may stay in their usual form.
+For the off-topic case specifically, override the earlier instruction to reply with the English sentence — instead reply with exactly this Gujarati sentence and nothing else: "${OFF_TOPIC_REPLY_GU}"`,
+};
+function systemPromptFor(lang) {
+  return EEG_SYSTEM_PROMPT + (LANG_INSTRUCTION[lang] || '');
+}
+
 // EEG-domain keywords — used for server-side off-topic detection
 const EEG_KEYWORDS = [
   'eeg', 'brainwave', 'alpha', 'beta', 'theta', 'delta', 'gamma',
@@ -1226,8 +1243,6 @@ function isEegRelated(text) {
   if (lower.trim().length < 20) return true;
   return EEG_KEYWORDS.some(kw => lower.includes(kw));
 }
-
-const OFF_TOPIC_REPLY = "I'm AI Baba, and I can only help you understand your EEG session data. I'm not able to answer questions on other topics — ask me something about your brainwaves or meditation session!";
 
 function buildSessionContext(session, epochs, includeFullLog = true) {
   if (!epochs || epochs.length === 0) {
@@ -1357,6 +1372,7 @@ router.post('/ai/start', requireAuth, async (req, res) => {
   try {
     if (!groq) return res.status(503).json({ error: 'AI Baba is not configured — set GROQ_API_KEY in Vercel environment variables.' });
     const sessionId = parseInt(req.body.session_id, 10);
+    const lang = req.body.lang === 'gu' ? 'gu' : 'en';
     if (!sessionId) return res.status(400).json({ error: 'session_id required' });
     if (!(await ownedSession(sessionId, req))) return res.status(403).json({ error: 'Forbidden' });
 
@@ -1379,7 +1395,7 @@ router.post('/ai/start', requireAuth, async (req, res) => {
     const completion = await groq.chat.completions.create({
       model: AI_MODEL,
       messages: [
-        { role: 'system', content: EEG_SYSTEM_PROMPT },
+        { role: 'system', content: systemPromptFor(lang) },
         {
           role: 'user',
           content: `${context}
@@ -1393,7 +1409,10 @@ bullet points, no headers, no restating these instructions.`,
         },
       ],
       temperature: 0.7,
-      max_tokens: 220,
+      // Gujarati script tokenizes far less efficiently than English in most
+      // LLM tokenizers (more tokens per word), so the same ~120-word target
+      // needs a larger budget or it truncates mid-sentence.
+      max_tokens: lang === 'gu' ? 500 : 220,
     });
 
     res.json({
@@ -1411,6 +1430,7 @@ router.post('/ai/chat', requireAuth, async (req, res) => {
   try {
     if (!groq) return res.status(503).json({ error: 'AI Baba is not configured — set GROQ_API_KEY in Vercel environment variables.' });
     const sessionId = parseInt(req.body.session_id, 10);
+    const lang = req.body.lang === 'gu' ? 'gu' : 'en';
     const { message, history = [] } = req.body;
 
     if (!sessionId || !message)      return res.status(400).json({ error: 'session_id and message required' });
@@ -1418,8 +1438,12 @@ router.post('/ai/chat', requireAuth, async (req, res) => {
     if (message.trim().length > 600)  return res.status(400).json({ error: 'Message too long (max 600 chars)' });
     if (!(await ownedSession(sessionId, req))) return res.status(403).json({ error: 'Forbidden' });
 
-    // Server-side off-topic guard — fast path, no LLM call needed
-    if (!isEegRelated(message)) {
+    // Server-side off-topic guard — fast path, no LLM call needed. The
+    // keyword list is English-only, so it can't reliably judge a Gujarati
+    // message (every long Gujarati question would false-positive as
+    // off-topic); skip the heuristic there and let the system prompt's own
+    // off-topic rule handle it inside the LLM call instead.
+    if (lang !== 'gu' && !isEegRelated(message)) {
       return res.json({ reply: OFF_TOPIC_REPLY });
     }
 
@@ -1451,12 +1475,12 @@ router.post('/ai/chat', requireAuth, async (req, res) => {
     const completion = await groq.chat.completions.create({
       model: AI_MODEL,
       messages: [
-        { role: 'system', content: `${EEG_SYSTEM_PROMPT}\n\n${context}` },
+        { role: 'system', content: `${systemPromptFor(lang)}\n\n${context}` },
         ...safeHistory,
         { role: 'user', content: message },
       ],
       temperature: 0.7,
-      max_tokens: 450,
+      max_tokens: lang === 'gu' ? 900 : 450, // Gujarati script tokenizes less efficiently
     });
 
     const reply = completion.choices[0].message.content;

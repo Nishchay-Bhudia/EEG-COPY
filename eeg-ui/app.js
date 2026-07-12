@@ -7,6 +7,33 @@
 
 'use strict';
 
+// ── Language selector (i18n.js defines I18N/t/getLang/setLang/applyI18n) ──────
+applyI18n();
+document.querySelectorAll('.lang-btn').forEach(btn => {
+  btn.addEventListener('click', () => setLang(btn.dataset.lang));
+});
+// Re-render whatever's currently on screen with the new language — state
+// names, notes, and numbers are re-applied from the same underlying reading,
+// not re-fetched, so switching is instant and never loses live data.
+function onLanguageChanged() {
+  // Topbar title is set once per nav click (showView), not part of applyReading.
+  if (typeof VIEWS !== 'undefined' && typeof currentView !== 'undefined' && currentView && VIEWS[currentView]) {
+    const titleEl = document.getElementById('topbar-title');
+    if (titleEl) titleEl.textContent = t(VIEWS[currentView].titleKey);
+  }
+  if (typeof lastAppliedReading !== 'undefined' && lastAppliedReading) {
+    applyReading(lastAppliedReading);
+  }
+  // pingBackendStatus writes "ready"/"loading model..." once at login, outside
+  // applyReading — re-run it so that text also follows a language switch
+  // (caught by actually rendering the page and screenshotting it, not just
+  // reading the code: the MODE field kept showing English "ready" after
+  // switching to Gujarati because nothing re-rendered it).
+  if (typeof backendUrl !== 'undefined' && backendUrl && typeof pingBackendStatus === 'function') {
+    pingBackendStatus(backendUrl);
+  }
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const SAMPLE_RATE = 256;
 // Analysis window per epoch. Longer = each state reading holds longer on screen
@@ -46,10 +73,13 @@ const BRAINBIT_CMD_SIGNAL = new Uint8Array([2, 0, 0, 0, 0]); // start signal mod
 
 const DEPTH_PCT = { 'Deep Inertia': 3, Surface: 12, Emerging: 37, Deep: 62, Profound: 94 };
 const CHITTA_DEPTHS = { Mudha: 'Deep Inertia', Kshipta: 'Surface', Vikshipta: 'Emerging', Ekagra: 'Deep', Niruddha: 'Profound' };
+// Getter-based so SWARA_NOTES.ida etc always reflects the current language —
+// none of the Swara classification logic that reads these (classifyLocal) is
+// touched, only what the resulting note text resolves to.
 const SWARA_NOTES = {
-  ida: 'Parasympathetic dominance. Receptive, creative and introspective state.',
-  pingala: 'Sympathetic dominance. Active, analytical and goal-directed focus.',
-  sushumna: 'Equilibrium of solar and lunar channels. Gateway to higher contemplative states.',
+  get ida() { return t('swaraNoteIda'); },
+  get pingala() { return t('swaraNotePingala'); },
+  get sushumna() { return t('swaraNoteSushumna'); },
 };
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -175,14 +205,14 @@ async function checkAuth() {
 // [data-nav] sidebar button; onShow runs each time the view is entered. Later phases
 // register their render fns as onShow hooks against the stub views.
 const VIEWS = {
-  dashboard: { title: 'Live Monitor',     onShow: onShowDashboard },
-  home:      { title: 'This Week', onShow: onShowHome },
-  cohort:    { title: 'Cohort',    onShow: onShowCohort },
-  client:    { title: 'Clients',   onShow: onShowClient },
-  replay:    { title: 'Replay', onShow: onShowReplay },
-  analyze:   { title: 'Analyze', onShow: onShowAnalyze },
-  prescribe: { title: 'Prescribe' },
-  admin:     { title: 'Admin Dashboard', elevatedOnly: true, onShow: onShowAdmin },
+  dashboard: { titleKey: 'navLiveMonitor',      onShow: onShowDashboard },
+  home:      { titleKey: 'navThisWeek',         onShow: onShowHome },
+  cohort:    { titleKey: 'navCohort',           onShow: onShowCohort },
+  client:    { titleKey: 'navClients',          onShow: onShowClient },
+  replay:    { titleKey: 'navReplay',           onShow: onShowReplay },
+  analyze:   { titleKey: 'navAnalyze',          onShow: onShowAnalyze },
+  prescribe: { titleKey: 'navPrescribe' },
+  admin:     { titleKey: 'adminDashboardTitle', elevatedOnly: true, onShow: onShowAdmin },
 };
 
 let currentView = null;
@@ -203,7 +233,7 @@ function showView(name) {
   qAll('[data-view]').forEach(el => el.classList.toggle('is-active', el.dataset.view === name));
   qAll('[data-nav]').forEach(el => el.classList.toggle('is-active', el.dataset.nav === name));
   const titleEl = $('topbar-title');
-  if (titleEl) titleEl.textContent = view.title;
+  if (titleEl) titleEl.textContent = t(view.titleKey);
   currentView = name;
   if (view.onShow) view.onShow();
 }
@@ -494,6 +524,7 @@ async function loadAdminUsers() {
       `;
       tbody.appendChild(tr);
     });
+    localizeDom(tbody);
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="5">${escHtml(err.message)}</td></tr>`;
   }
@@ -570,13 +601,14 @@ async function loadAdminSessions() {
       tbody.appendChild(tr);
     });
 
-    loadEpochCounts(sessions);
+    localizeDom(tbody);
+    loadEpochCounts(sessions, tbody);
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="6">${escHtml(err.message)}</td></tr>`;
   }
 }
 
-async function loadEpochCounts(sessions) {
+async function loadEpochCounts(sessions, tbody) {
   await Promise.allSettled(sessions.map(async s => {
     try {
       const data = await api('GET', '/sessions/' + s.id + '/analytics');
@@ -584,6 +616,7 @@ async function loadEpochCounts(sessions) {
       if (el) el.textContent = data.summary?.totalEpochs ?? 0;
     } catch { /* ignore */ }
   }));
+  if (tbody) localizeDom(tbody);
 }
 
 $('admin-sessions-tbody').addEventListener('click', async e => {
@@ -627,6 +660,7 @@ async function openSessionAnalytics(sessionId, sessionName) {
     renderAnalyticsTimeline(data.phases || []);
     setAnalyticsState('content');
     loadAnalyticsNotes(sessionId);
+    localizeDom(document.querySelector('.analytics-panel'));
   } catch (err) {
     $('analytics-error').textContent = err.message;
     setAnalyticsState('error');
@@ -638,8 +672,8 @@ function pct(v) { return v != null ? Math.round(v * 100) + '%' : '—'; }
 function renderAnalyticsSummary(s) {
   $('a-total-epochs').textContent = s.totalEpochs ?? '—';
   $('a-duration').textContent = s.durationSeconds ? formatDuration(s.durationSeconds) : '—';
-  $('a-dominant-guna').textContent = s.dominantGuna ? capitalize(s.dominantGuna) : '—';
-  $('a-dominant-state').textContent = s.dominantState ?? '—';
+  $('a-dominant-guna').textContent = s.dominantGuna ? t(s.dominantGuna.toLowerCase()) : '—'; // 'sattva'/'rajas'/'tamas' key
+  $('a-dominant-state').textContent = s.dominantState ? translateState(s.dominantState) : '—';
   $('a-avg-spo2').textContent = s.avgSpo2 != null ? s.avgSpo2.toFixed(1) : '—';
   $('a-avg-hr').textContent = s.avgHr != null ? s.avgHr.toFixed(0) : '—';
 
@@ -912,12 +946,13 @@ function updateReplayDisplay(idx) {
   const alphaValEl = $('replay-alpha-val');
   const spo2ValEl = $('replay-spo2-val');
   const hrValEl = $('replay-hr-val');
-  if (stateValEl) stateValEl.textContent = ep.chittaBhumi || '—';
-  if (swaraValEl) swaraValEl.textContent = ep.swara || '—';
-  if (gunaValEl) gunaValEl.textContent = ep.gunas?.label || '—';
+  if (stateValEl) stateValEl.textContent = ep.chittaBhumi ? translateState(ep.chittaBhumi) : '—';
+  if (swaraValEl) swaraValEl.textContent = ep.swara ? translateSwaraNadi(ep.swara) : '—';
+  if (gunaValEl) gunaValEl.textContent = ep.gunas?.label ? translateGunaLabel(ep.gunas.label) : '—';
   if (alphaValEl) alphaValEl.textContent = ep.bands?.alpha != null ? Math.round(ep.bands.alpha * 100) + '%' : '—';
   if (spo2ValEl) spo2ValEl.textContent = ep.bloodOxygen != null ? ep.bloodOxygen.toFixed(1) + '%' : '—';
   if (hrValEl) hrValEl.textContent = ep.heartRate != null ? ep.heartRate.toFixed(0) + ' bpm' : '—';
+  localizeDom(document.querySelector('.replay-view'));
 }
 
 // ── Session management ────────────────────────────────────────────────────────
@@ -943,9 +978,9 @@ $('btn-start-session').addEventListener('click', async () => {
     clearInterval(sessionTimerInterval);
     sessionTimerInterval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - sessionStartTimestamp) / 1000);
-      $('session-timer').textContent = formatTime(elapsed);
+      $('session-timer').textContent = localizeNumber(formatTime(elapsed));
     }, 1000);
-    $('session-timer').textContent = '0:00';
+    $('session-timer').textContent = localizeNumber('0:00');
   } catch (err) {
     alert('Failed to start session: ' + err.message);
   }
@@ -1298,14 +1333,14 @@ const DEMO_CORROB = {
 $('btn-demo').addEventListener('click', () => {
   if (mode === 'demo') {
     clearInterval(demoTimer); demoTimer = null;
-    mode = 'idle'; setStatus('', 'disconnected');
+    mode = 'idle'; setStatus('', t('disconnected'));
     $('btn-demo').textContent = '▶ Demo';
     return;
   }
   if (mode === 'bluetooth') disconnectBluetooth();
   mode = 'demo';
   resetSmoothing();
-  setStatus('demo', 'demo mode');
+  setStatus('demo', t('statusDemoMode'));
   $('btn-demo').textContent = '⏹ Stop Demo';
 
   const ALL_DEMO_STATES = ['Mudha','Kshipta','Vikshipta','Ekagra','Niruddha'];
@@ -1415,31 +1450,18 @@ function updateBattery(pct) {
 }
 
 // Show the HR/SpO2 vitals cards only when the connected driver streams PPG.
-// Cards themselves stay visible for any PPG-capable device (Muse) as soon as
-// it's connected — hiding the whole card made it look like the feature was
-// broken/missing. What's gated on real data is the VALUE inside each card
-// (applyReading below): "—" / "awaiting signal" until a real reading exists,
-// a real number once one does.
-function updateVitalsVisibility(driver) {
-  const show = !!(driver && driver.hasPPG);
-  for (const id of ['spo2-card', 'hr-card']) {
-    const el = $(id);
-    if (el) el.style.display = show ? '' : 'none';
-  }
-}
+// The HR/SpO2 cards are always visible (index.html — no display:none), even
+// before a headband is ever connected. What's gated on real data is the
+// VALUE inside each card (applyReading below): "—" / "awaiting signal" until
+// a real reading exists, a real number once one does. Kept as a no-op (rather
+// than deleting) so its call sites don't need touching.
+function updateVitalsVisibility(driver) {}
 
 // Generic sink: all drivers funnel decoded µV samples through here.
 function pushSamples(ch, samples) {
   if (!bleChannels[ch]) return;
   bleChannels[ch].push(...samples);
   bleSamTick += samples.length;
-
-  // Blink detection reads the active driver's primary frontal channel only
-  // (Muse: AF7) — purely observational, never touches bleChannels itself, so
-  // it cannot affect the real epoch analysis either way.
-  if (activeDriver && activeDriver.frontalChannels && activeDriver.frontalChannels[0] === ch) {
-    feedBlinkChannel(samples);
-  }
 
   const buf = Math.min(bleChannels[0].length, COLLECT_N);
   const bufEl = $('val-buffer');
@@ -1448,127 +1470,12 @@ function pushSamples(ch, samples) {
   if (bleChannels[0].length >= COLLECT_N) processBluetoothEEG();
 }
 
-// ── Blink detection ─────────────────────────────────────────────────────────
-// Real-time peak-threshold detector on the active driver's primary frontal
-// channel — the simplest of the standard EEG blink-detection approaches, and
-// the only one that fits a real-time client-side pipeline without an offline
-// ICA/ML step. Grounded in the well-established literature on EOG/blink
-// artifacts: blinks are a corneo-retinal-dipole potential that shows up as a
-// sharp deflection roughly an order of magnitude larger than background EEG
-// (~100-200 uV vs a few-to-tens of uV), concentrated below ~8 Hz, strongest at
-// frontal electrodes and falling off fast with distance from the eyes, and
-// lasting ~100-200 ms with a slower return to baseline.
-//
-// Method: baseline mean/std over a ~1s window, but LAGGED ~250ms behind the
-// sample being tested (see BLINK_LAG) — a naive rolling window that includes
-// the current sample inflates its own mean/std as a blink arrives (verified:
-// a real blink's std contribution grows faster than the hold-duration check
-// below can be satisfied, so genuine blinks were never firing). Lagging the
-// baseline so it doesn't yet contain the blink fixes this. Flag a candidate
-// when a sample deviates from that (lagged) baseline by >= 6x its std (a
-// large multiplier on purpose — literature describes blinks as an order of
-// magnitude larger than normal EEG, not everyday alpha/theta fluctuation),
-// require the deviation to hold >= 80ms (rejects single-sample glitches), and
-// apply a ~400ms refractory so one blink's slow return-to-baseline isn't
-// double-counted as two. Verified against synthetic blink-shaped signals:
-// 100% recall, 0 false positives over 240s of pure baseline noise.
-const BLINK_LAG = 64;            // ~250ms — keeps a blink from inflating its own baseline
-const BLINK_BASE_WIN = 256;      // ~1s baseline window, measured BLINK_LAG samples in the past
-const BLINK_MIN_HOLD_MS = 80;
-const BLINK_REFRACTORY_MS = 400;
-const BLINK_STD_MULT = 6;
-
-let blinkHist = [];        // all recent frontal-channel samples (periodically trimmed)
-let blinkTrimOffset = 0;   // true sample index of blinkHist[0]
-let blinkSum = 0, blinkSumSq = 0, blinkStatN = 0;
-let blinkCandidateSince = null;
-let lastBlinkAt = -Infinity;
-let blinkCount = 0;
-
-function resetBlinkDetection() {
-  blinkHist = []; blinkTrimOffset = 0;
-  blinkSum = 0; blinkSumSq = 0; blinkStatN = 0;
-  blinkCandidateSince = null;
-  lastBlinkAt = -Infinity;
-  blinkCount = 0;
-  updateBlinkUI();
-}
-
-function updateBlinkUI() {
-  const el = $('val-blinks');
-  if (!el) return;
-  if (!activeDriver) { el.textContent = '—'; return; }
-  const supported = !!(activeDriver.frontalChannels && activeDriver.frontalChannels.length);
-  el.textContent = supported ? String(blinkCount) : 'n/a';
-}
-
-function flashBlinkIndicator() {
-  const el = $('val-blinks');
-  if (!el) return;
-  el.classList.add('blink-flash');
-  setTimeout(() => el.classList.remove('blink-flash'), 250);
-}
-
-function feedBlinkChannel(samples) {
-  const now = performance.now();
-  for (const v of samples) {
-    blinkHist.push(v);
-    const curTrueIdx = blinkTrimOffset + blinkHist.length - 1;
-
-    // The sample that just became BLINK_LAG samples old enters the baseline
-    // window now — the current sample `v` is never part of its own baseline.
-    const enterTrueIdx = curTrueIdx - BLINK_LAG;
-    if (enterTrueIdx >= blinkTrimOffset) {
-      const enterVal = blinkHist[enterTrueIdx - blinkTrimOffset];
-      blinkSum += enterVal; blinkSumSq += enterVal * enterVal; blinkStatN++;
-      if (blinkStatN > BLINK_BASE_WIN) {
-        const exitTrueIdx = enterTrueIdx - BLINK_BASE_WIN;
-        const exitVal = blinkHist[exitTrueIdx - blinkTrimOffset];
-        blinkSum -= exitVal; blinkSumSq -= exitVal * exitVal; blinkStatN--;
-      }
-    }
-    // Bound memory — trim once well past anything still indexed above.
-    if (blinkHist.length > (BLINK_LAG + BLINK_BASE_WIN) * 4) {
-      const trimN = blinkHist.length - (BLINK_LAG + BLINK_BASE_WIN) * 2;
-      blinkHist.splice(0, trimN);
-      blinkTrimOffset += trimN;
-    }
-
-    if (blinkStatN < BLINK_BASE_WIN) continue; // let the lagged baseline fill first
-
-    const mean = blinkSum / blinkStatN;
-    const variance = Math.max(0, blinkSumSq / blinkStatN - mean * mean);
-    const std = Math.sqrt(variance) || 1e-9;
-    const dev = Math.abs(v - mean);
-
-    if (dev >= BLINK_STD_MULT * std) {
-      if (blinkCandidateSince == null) blinkCandidateSince = now;
-      if (now - blinkCandidateSince >= BLINK_MIN_HOLD_MS && now - lastBlinkAt >= BLINK_REFRACTORY_MS) {
-        lastBlinkAt = now;
-        blinkCandidateSince = null;
-        blinkCount++;
-        updateBlinkUI();
-        flashBlinkIndicator();
-      }
-    } else {
-      blinkCandidateSince = null;
-    }
-  }
-}
-
 const MuseDriver = {
   id: 'muse',
   name: 'Muse',
   sampleRate: 256,
   channelCount: 4,
   hasPPG: true,  // Muse S streams PPG → heart-rate + SpO2 vitals
-  // Channel order is TP9, AF7, AF8, TP10 (standard Muse layout — see
-  // FeatureExtractor's left/right hemisphere indices on the backend, which
-  // use this same order). AF7/AF8 are the frontal pair closest to the eyes —
-  // the only channels on this device where a blink artifact is reliably
-  // visible (blinks are largest at frontal sites and fall off fast with
-  // distance from the eyes).
-  frontalChannels: [1, 2],
 
   // Advertised by the scan filter and identifies the device after connect.
   filters: [{ services: [MUSE_SERVICE_UUID] }],
@@ -1640,12 +1547,6 @@ const BrainBitDriver = {
   sampleRate: 250,
   channelCount: 4,
   hasPPG: false, // EEG only — no optical pulse sensor, so no HR/SpO2
-  // BrainBit's standard 4-channel montage is O1/O2 (occipital) + T3/T4
-  // (temporal) — no frontal coverage, so blinks (strongest at frontal sites,
-  // falling off fast with distance from the eyes) aren't reliably visible on
-  // this device. Left empty rather than guessing at a channel that isn't
-  // actually near the eyes.
-  frontalChannels: [],
 
   // BrainBit does not reliably advertise its service UUID, so scan by name.
   filters: [{ namePrefix: 'BrainBit' }],
@@ -1722,7 +1623,7 @@ async function connectBluetooth() {
     let server = null;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
-        setStatus('bluetooth', 'connecting… (' + attempt + '/4)');
+        setStatus('bluetooth', t('statusConnecting') + ' (' + attempt + '/4)');
         server = await device.gatt.connect();
         break;
       } catch (e) {
@@ -1741,7 +1642,6 @@ async function connectBluetooth() {
     activeDriver = driver;
     activeSampleRate = driver.sampleRate;
     updateVitalsVisibility(driver); // HR/SpO2 only for PPG-capable devices
-    resetBlinkDetection(); // blink count + frontal-channel baseline, per connection
     // Size the channel buffers for this device.
     bleChannels.length = 0;
     for (let i = 0; i < driver.channelCount; i++) bleChannels.push([]);
@@ -1756,7 +1656,7 @@ async function connectBluetooth() {
     if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
     mode = 'bluetooth';
     resetSmoothing();
-    setStatus('bluetooth', driver.name + ' connected');
+    setStatus('bluetooth', driver.name + ' ' + t('statusConnected'));
     $('btn-bluetooth').classList.add('bt-active');
     $('bt-device-name').textContent = device.name || (driver.name + ' device');
     $('bt-device-row').style.display = '';
@@ -1764,7 +1664,7 @@ async function connectBluetooth() {
   } catch (err) {
     if (!err.message?.includes('cancelled')) {
       console.warn('BT connect failed:', err.message);
-      setStatus('error', 'BT failed: ' + err.message);
+      setStatus('error', t('statusBluetoothFailed') + ': ' + err.message);
     }
   }
 }
@@ -1895,9 +1795,8 @@ function disconnectBluetooth() {
   bleChannels.forEach(ch => { ch.length = 0; });
   ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
   latestHeartRate = null; latestSpO2 = null; resetPpgSmoothing();
-  resetBlinkDetection();
   mode = 'idle';
-  setStatus('', 'disconnected');
+  setStatus('', t('disconnected'));
   $('btn-bluetooth').classList.remove('bt-active');
   const bufEl = $('val-buffer');
   if (bufEl) bufEl.textContent = '0 / ' + COLLECT_N;
@@ -2034,23 +1933,23 @@ async function pingBackendStatus(url) {
       const data = await res.json();
       const boardEl = $('val-board');
       const modeEl = $('val-mode');
-      if (boardEl) boardEl.textContent = 'Render backend';
-      if (modeEl) modeEl.textContent = data.model_ready ? 'ready' : 'loading model…';
+      if (boardEl) boardEl.textContent = t('renderBackendLabel');
+      if (modeEl) modeEl.textContent = data.model_ready ? t('statusReady') : t('statusLoadingModelDots');
     }
   } catch {
     const boardEl = $('val-board');
-    if (boardEl) boardEl.textContent = 'backend waking…';
+    if (boardEl) boardEl.textContent = t('statusBackendWaking');
   }
 }
 
 async function connectBackendUrl(url) {
   if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
   mode = 'backend';
-  setStatus('waking', 'waking up…');
+  setStatus('waking', t('statusWakingUp'));
   const boardEl = $('val-board');
   const modeEl = $('val-mode');
-  if (boardEl) boardEl.textContent = 'Render backend';
-  if (modeEl) modeEl.textContent = 'BLE → Render';
+  if (boardEl) boardEl.textContent = t('renderBackendLabel');
+  if (modeEl) modeEl.textContent = t('modeBleRender');
 
   let attempts = 0;
   const MAX = 40;
@@ -2065,18 +1964,18 @@ async function connectBackendUrl(url) {
         if (data.model_ready) {
           modelConfirmedReady = true;
           clearInterval(backendPollTimer); backendPollTimer = null;
-          setStatus('connected', 'backend ready');
+          setStatus('connected', t('statusBackendReady'));
         } else {
-          setStatus('waking', 'model loading…');
+          setStatus('waking', t('statusModelLoading'));
         }
       } else {
-        setStatus('waking', 'waking up…');
+        setStatus('waking', t('statusWakingUp'));
       }
     } catch {
       if (attempts >= MAX) {
         modelConfirmedReady = true; // stop retrying
         clearInterval(backendPollTimer); backendPollTimer = null;
-        setStatus('error', 'backend offline');
+        setStatus('error', t('statusBackendOffline'));
       }
     }
   };
@@ -2095,7 +1994,7 @@ function stopAll() {
   if (sseSource) { sseSource.close(); sseSource = null; }
   if (mode === 'bluetooth') disconnectBluetooth();
   mode = 'idle';
-  setStatus('', 'disconnected');
+  setStatus('', t('disconnected'));
   const demoBtn = $('btn-demo');
   if (demoBtn) demoBtn.textContent = '▶ Demo';
 }
@@ -2201,7 +2100,7 @@ function renderInnerTexture(r) {
   // Vṛtti — mental activity, 0 (still / nirodha) → 100 (scattered).
   setTextureBar('vritti', r.vritti_index != null ? r.vritti_index * 100 : null);
   const nir = $('nirodha-state');
-  if (nir) nir.textContent = r.nirodha_state || '—';
+  if (nir) nir.textContent = r.nirodha_state ? translateNirodha(r.nirodha_state) : '—';
 
   // Mind Richness — roll the four complexity metrics into one gauge.
   const cx = r.complexity;
@@ -2230,19 +2129,7 @@ function renderInnerTexture(r) {
 // it. No backend jargon reaches the screen — axis keys map to lay names, the
 // `agrees` flag becomes a ✓ / ~ / – marker, and a divergence shows an honest
 // caveat rather than being hidden. Mirrors the backend `corroborate` output.
-const CORROB_LAY_AXIS = {
-  neural_complexity:    'Mind richness',
-  cortical_quietude:    'Background stillness',
-  mental_chatter:       'Mental chatter',
-  absorption_signature: 'Focus',
-  effortlessness:       'Effortlessness',
-};
-const CORROB_CONCORD = {
-  corroborated: 'Signals agree',
-  mixed:        'Mixed signals',
-  tension:      'Signals in tension',
-  inconclusive: 'Inconclusive',
-};
+// Translated via t('axis_' + key) / t('concord_' + key) — see i18n.js.
 
 function corrTone(agrees)  { return agrees === true ? 'support' : agrees === false ? 'tension' : 'neutral'; }
 function corrGlyph(agrees) { return agrees === true ? '✓'       : agrees === false ? '~'       : '–'; }
@@ -2263,22 +2150,22 @@ function renderCorroboration(r) {
     return `<div class="corrob-row">
         <span class="corrob-mark ${tone}">${corrGlyph(a.agrees)}</span>
         <div class="corrob-text">
-          <span class="corrob-name">${escHtml(CORROB_LAY_AXIS[a.axis] || a.axis)}</span>
+          <span class="corrob-name">${escHtml(t('axis_' + a.axis) || a.axis)}</span>
           <span class="corrob-note">${escHtml(a.note || '')}</span>
         </div>
         <span class="corrob-reading">${escHtml(chip)}</span>
       </div>`;
   }).join('');
 
-  const tentative = co.indeterminate ? '<span class="corrob-tentative">held gently</span>' : '';
+  const tentative = co.indeterminate ? `<span class="corrob-tentative">${escHtml(t('corrobHeldGently'))}</span>` : '';
   const caveat = co.caveat
     ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(co.caveat)}</span></div>`
     : '';
 
   host.innerHTML = `
     <div class="corrob-head">
-      <span class="card-label">WHAT THE SIGNALS SAY</span>
-      <span class="corrob-concord ${concordTone}">${escHtml(CORROB_CONCORD[co.concord] || co.concord)}</span>
+      <span class="card-label">${escHtml(t('corrobTitle'))}</span>
+      <span class="corrob-concord ${concordTone}">${escHtml(t('concord_' + co.concord) || co.concord)}</span>
     </div>
     ${tentative}
     <div class="corrob-rows">${rows}</div>
@@ -2343,6 +2230,18 @@ function formatConfidencePct(c) {
   const n = typeof c === 'string' ? parseFloat(c) : c;
   if (isNaN(n)) return String(c);
   return Math.round((n <= 1 ? n * 100 : n)) + '%';
+}
+
+const DATA_QUALITY_KEYS = {
+  '⏪ replay': 'qualityReplay',
+  '✓ local FFT': 'qualityLocalFft',
+  '✓ demo': 'qualityDemo',
+  '✓ BLE → Render': 'qualityBleRender',
+};
+function translateDataQuality(q) {
+  if (!q) return q;
+  const key = DATA_QUALITY_KEYS[q];
+  return key ? t(key) : q;
 }
 
 // Plain-language band over the vṛtti index — mirrors the backend thresholds.
@@ -2467,13 +2366,16 @@ function smoothReading(r) {
   };
 }
 
+let lastAppliedReading = null;
+
 function applyReading(r) {
+  lastAppliedReading = r; // so switching language can instantly re-render this same reading
   // ── Epoch / quality / latency ──
   const epochEl = $('val-epoch');
   const qualEl = $('val-quality');
   const latEl = $('val-latency');
   if (epochEl) epochEl.textContent = r.epoch ?? epoch;
-  if (qualEl) qualEl.textContent = r.data_quality || '—';
+  if (qualEl) qualEl.textContent = translateDataQuality(r.data_quality) || '—';
   if (latEl) latEl.textContent = r.latency_ms != null ? r.latency_ms.toFixed(1) : '—';
 
   // ── Chitta Bhumi ──
@@ -2481,8 +2383,8 @@ function applyReading(r) {
   const state = ch.state || '—';
   const chittaEl = $('chitta-state');
   const chittaSubEl = $('chitta-sub');
-  if (chittaEl) chittaEl.textContent = state;
-  if (chittaSubEl) chittaSubEl.textContent = ch.depth || formatConfidencePct(ch.confidence) || '—';
+  if (chittaEl) chittaEl.textContent = translateState(state);
+  if (chittaSubEl) chittaSubEl.textContent = (ch.depth ? translateDepth(ch.depth) : null) || formatConfidencePct(ch.confidence) || '—';
 
   const depth = ch.depth || CHITTA_DEPTHS[state] || 'Surface';
   const depthPct = DEPTH_PCT[depth] ?? 12;
@@ -2499,7 +2401,7 @@ function applyReading(r) {
   const confEl = $('val-confidence');
   const depthEl = $('val-depth');
   if (confEl) confEl.textContent = formatConfidencePct(ch.confidence);
-  if (depthEl) depthEl.textContent = depth;
+  if (depthEl) depthEl.textContent = translateDepth(depth);
 
   const probs = ch.probabilities || {};
   // All 5 Chitta Bhumis (v2 adds Mudha)
@@ -2522,8 +2424,12 @@ function applyReading(r) {
 
   const swaraNote = $('swara-note');
   const swaraConf = $('swara-confidence');
-  if (swaraNote) swaraNote.textContent = sw.note || (isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna);
-  if (swaraConf) swaraConf.textContent = sw.confidence || '—';
+  // In Gujarati, prefer the translated fallback note over the backend's own
+  // (DO-NOT-TOUCH, English-only) note text — a frontend rendering choice
+  // only, nothing about how the backend classifies Swara changes.
+  const swaraFallback = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
+  if (swaraNote) swaraNote.textContent = getLang() === 'gu' ? swaraFallback : (sw.note || swaraFallback);
+  if (swaraConf) swaraConf.textContent = sw.confidence ? translateConfidenceWord(sw.confidence) : '—';
 
   const glIda = $('glyph-ida');
   const glSus = $('glyph-sushumna');
@@ -2582,8 +2488,8 @@ function applyReading(r) {
   const tattvaEl = $('tattva-flags');
   if (tattvaEl) {
     tattvaEl.innerHTML = flags.length
-      ? flags.map(f => `<span class="tattva-tag">${escHtml(f)}</span>`).join('')
-      : '<span class="tattva-tag muted">None detected</span>';
+      ? flags.map(f => `<span class="tattva-tag">${escHtml(translateTattvaFlag(f))}</span>`).join('')
+      : `<span class="tattva-tag muted">${escHtml(t('noneDetected'))}</span>`;
   }
 
   // ── Trigunas ──
@@ -2602,11 +2508,11 @@ function applyReading(r) {
     : gunas.rajas > gunas.tamas ? 'Rajasic' : gunas.tamas ? 'Tamasic' : '—');
   const gunaDominantEl = $('gunas-dominant');
   const gunaNoteEl = $('gunas-note');
-  if (gunaDominantEl) gunaDominantEl.textContent = gunaLabel || '—';
+  if (gunaDominantEl) gunaDominantEl.textContent = translateGunaLabel(gunaLabel) || '—';
   if (gunaNoteEl) {
-    gunaNoteEl.textContent = gunaLabel === 'Sattvic' ? 'clarity & balance dominant'
-      : gunaLabel === 'Rajasic' ? 'activity & passion dominant'
-      : gunaLabel === 'Tamasic' ? 'inertia & heaviness dominant' : '';
+    gunaNoteEl.textContent = gunaLabel === 'Sattvic' ? t('gunaNoteSattvic')
+      : gunaLabel === 'Rajasic' ? t('gunaNoteRajasic')
+      : gunaLabel === 'Tamasic' ? t('gunaNoteTamasic') : '';
   }
 
   // ── Inner Texture (vṛtti / richness / stillness) ──
@@ -2624,8 +2530,10 @@ function applyReading(r) {
   const hrStatusEl = $('hr-status');
   if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
   if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
-  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? 'live reading' : 'awaiting signal';
-  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? 'live reading' : 'awaiting signal';
+  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? t('liveReading') : t('awaitingSignal');
+  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? t('liveReading') : t('awaitingSignal');
+
+  localizeDom(document.querySelector('.dashboard-grid'));
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -2720,7 +2628,7 @@ async function aiBabaSelectSession(sessionId, sessionName) {
   const label = $('ai-baba-session-label'); if (label) label.textContent = sessionName;
   aiBabaShowStep('loading');
   try {
-    const data = await api('POST', '/ai/start', { session_id: sessionId });
+    const data = await api('POST', '/ai/start', { session_id: sessionId, lang: getLang() });
     aiBabaShowStep('chat');
     const summary = data.summary || 'Here is a summary of your session.';
     aiBabaAddMessage('assistant', summary);
@@ -2745,7 +2653,7 @@ async function aiBabaSendMessage() {
   aiBabaSetTyping(true);
   const msgs = $('ai-baba-messages'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
   try {
-    const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20) });
+    const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20), lang: getLang() });
     aiBabaSetTyping(false);
     const reply = data.reply || 'I could not process that. Please try again.';
     aiBabaAddMessage('assistant', reply);
@@ -2857,6 +2765,7 @@ async function loadAnalyzeSession(id) {
     drawSensorSchematic(s.avgBands || {});
     renderAnalyzeTexture(s);
     renderAnalyzeTattva(s.tattvaFlags || []);
+    localizeDom(document.querySelector('.analyze'));
   } catch (err) {
     anSetEmpty('Could not load analytics: ' + err.message);
   }
