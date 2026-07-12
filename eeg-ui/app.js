@@ -1463,10 +1463,19 @@ const MuseDriver = {
         buf.set(payload, 1);
         return buf;
       };
+      // Preset 21 is EEG-only and never turns the optical (PPG) sensors on —
+      // confirmed against the reference muse-js implementation (urish/muse-js
+      // src/muse.ts): preset 50 is the one that enables EEG + PPG together.
+      // p21 was why heart rate/SpO2 never streamed even though the PPG
+      // characteristics were subscribed below. Also matches muse-js's exact
+      // command sequence: halt -> preset -> 's' -> resume (the 's' write was
+      // previously missing here).
       await controlChar.writeValue(museCmd('h'));    // halt any prior streaming
       await new Promise(r => setTimeout(r, 300));
-      await controlChar.writeValue(museCmd('p21'));  // preset 21 = EEG mode
-      await new Promise(r => setTimeout(r, 300));
+      await controlChar.writeValue(museCmd('p50'));  // preset 50 = EEG + PPG
+      await new Promise(r => setTimeout(r, 150));
+      await controlChar.writeValue(museCmd('s'));    // apply preset
+      await new Promise(r => setTimeout(r, 150));
       await controlChar.writeValue(museCmd('d'));    // start streaming
       await new Promise(r => setTimeout(r, 500));    // let stream initialise before subscribing
     }
@@ -1666,6 +1675,10 @@ async function processBluetoothEEG() {
           depth: data.chitta_bhumi?.depth || data.depth || '—',
           confidence: data.chitta_bhumi?.confidence || '—',
           probabilities: data.chitta_bhumi?.probabilities || {},
+          // "WHAT THE SIGNALS SAY" — the backend always sends this, but it was
+          // dropped here, so it only ever showed in Demo mode (hand-authored
+          // DEMO_CORROB fixtures), never on a real headband run.
+          corroboration: data.chitta_bhumi?.corroboration || null,
         },
         swara: {
           state: data.swara?.state || '—',
@@ -1912,16 +1925,34 @@ function drawWave() {
   const cy = H / 2; // vertical centre of canvas
 
   if (mode === 'bluetooth' && bleSamTick > 0) {
-    // ── Live BLE: draw raw EEG samples ──────────────────────────────────
+    // ── Live BLE: draw EEG samples, lightly smoothed for display only ──────
+    // Raw per-sample EEG at 256 Hz plotted point-to-point is visually chaotic
+    // (blink/muscle artifacts alone can dwarf the underlying rhythm) even
+    // when the signal itself is fine. This is a display-only trailing
+    // moving-average + soft amplitude cap — bleChannels (what actually gets
+    // analysed) is read here but never mutated, so classification accuracy
+    // is unaffected.
     const ch0 = bleChannels[0];
     const len = Math.min(ch0.length, WAVE_LEN);
     if (len > 1) {
+      const raw = ch0.slice(ch0.length - len);
+      const win = 6;
+      const smoothed = new Array(len);
+      let sum = 0;
+      for (let i = 0; i < len; i++) {
+        sum += raw[i];
+        if (i >= win) sum -= raw[i - win];
+        smoothed[i] = sum / Math.min(i + 1, win);
+      }
+      const cap = H * 0.42; // keep artifact spikes on-canvas instead of jumping off it
       ctx.beginPath();
       ctx.strokeStyle = 'var(--accent, #56A67A)';
       ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       for (let i = 0; i < len; i++) {
         const x = (i / (len - 1)) * W;
-        const y = cy - ch0[ch0.length - len + i] * H * 400;
+        const y = cy - Math.max(-cap, Math.min(cap, smoothed[i] * H * 400));
         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -2106,6 +2137,18 @@ function renderAnalyzeTattva(flags) {
 
 function clamp01(x) { return (x == null || isNaN(x)) ? 0 : Math.max(0, Math.min(1, x)); }
 
+// Chitta-bhumi confidence arrives as a raw 0-1 fraction from smoothReading on
+// every live path (demo/BLE/local-FFT all funnel through it), but as a
+// DB-stored string from Replay — this normalizes either into "NN%" instead of
+// showing a bare decimal like "0.6045".
+function formatConfidencePct(c) {
+  if (c == null || c === '') return null;
+  if (typeof c === 'string' && c.trim().endsWith('%')) return c;
+  const n = typeof c === 'string' ? parseFloat(c) : c;
+  if (isNaN(n)) return String(c);
+  return Math.round((n <= 1 ? n * 100 : n)) + '%';
+}
+
 // Plain-language band over the vṛtti index — mirrors the backend thresholds.
 function nirodhaLabel(v) {
   return v < 0.20 ? 'Nirodha (still)'
@@ -2243,7 +2286,7 @@ function applyReading(r) {
   const chittaEl = $('chitta-state');
   const chittaSubEl = $('chitta-sub');
   if (chittaEl) chittaEl.textContent = state;
-  if (chittaSubEl) chittaSubEl.textContent = ch.depth || ch.confidence || '—';
+  if (chittaSubEl) chittaSubEl.textContent = ch.depth || formatConfidencePct(ch.confidence) || '—';
 
   const depth = ch.depth || CHITTA_DEPTHS[state] || 'Surface';
   const depthPct = DEPTH_PCT[depth] ?? 12;
@@ -2259,7 +2302,7 @@ function applyReading(r) {
 
   const confEl = $('val-confidence');
   const depthEl = $('val-depth');
-  if (confEl) confEl.textContent = ch.confidence || '—';
+  if (confEl) confEl.textContent = formatConfidencePct(ch.confidence);
   if (depthEl) depthEl.textContent = depth;
 
   const probs = ch.probabilities || {};
