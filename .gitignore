@@ -1,0 +1,34 @@
+# ── Node (eeg-ui) ──
+node_modules/
+.env
+.env.local
+.vercel
+*.log
+
+# ── .NET (eeg-backend) ──
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+.vs/
+.idea/
+
+# ── Local databases ──
+*.db
+*.db-shm
+*.db-wal
+
+# ── Python (legacy reference) ──
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ── OS ──
+.DS_Store
+
+# Vue build
+eeg-ui/web/dist/
+eeg-ui/web/node_modules/

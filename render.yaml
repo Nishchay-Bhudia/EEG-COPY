@@ -1,0 +1,40 @@
+# Render Blueprint — consolidated single service.
+# One Docker image (eeg-backend/Dockerfile) builds the Vue SPA and bakes it into
+# the .NET app's wwwroot, so ONE container serves the API + the UI from one
+# origin, backed by ONE database. (Supersedes the old two-service layout.)
+#
+# Build context is the repo root so the image can bundle both eeg-ui/web and
+# eeg-backend. Connection string + JWT key are wired automatically; secrets are
+# set in the dashboard. Deploys are driven by the GitHub "Deploy" workflow.
+
+databases:
+  - name: neuroyogic-db
+    databaseName: neuroyogic
+    user: neuroyogic
+    plan: free
+
+services:
+  - type: web
+    name: neuro-yogic
+    runtime: docker
+    dockerfilePath: ./eeg-backend/Dockerfile
+    dockerContext: .
+    plan: free
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: Database__Provider
+        value: Postgres
+      - key: ConnectionStrings__Default
+        fromDatabase:
+          name: neuroyogic-db
+          property: connectionString
+      - key: Jwt__SigningKey
+        generateValue: true
+      # Secrets — set in the dashboard:
+      - key: Admin__SeedPassword   # initial superadmin password (seeded on boot)
+        sync: false
+      - key: Groq__ApiKey          # AI Baba chat (optional)
+        sync: false

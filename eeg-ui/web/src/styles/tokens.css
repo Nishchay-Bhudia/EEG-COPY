@@ -1,0 +1,62 @@
+/* ════════════════════════════════════════════════════════════
+   DESIGN TOKENS — ported verbatim from legacy style.css :root
+   Palette: warm neutral #F7F6F2 · coral #D97757 · dark #1A1A19
+   Imported once in main.js. Shared across all views.
+════════════════════════════════════════════════════════════ */
+
+/* ─── Global reset (ported from style.css) ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #F7F6F2;
+  --bg-card:     #FFFFFF;
+  --bg-card-2:   #F2F0EB;
+  --accent:      #D97757;
+  --accent-dim:  #E8C4B3;
+  --text:        #1A1A19;
+  --text-mid:    #4A4A48;
+  --text-muted:  #8A8A87;
+  --border:      #E4E2DC;
+  --border-light:#EEECE7;
+
+  --kshipta:   #E08030;
+  --vikshipta: #D97757;
+  --ekagra:    #5B8DB8;
+  --niruddha:  #7C68A8;
+
+  --delta:  #9B6FBE;
+  --theta:  #5B8DB8;
+  --alpha:  #56A67A;
+  --beta:   #D4973A;
+  --gamma:  #C75C5C;
+
+  --ida:       #5B8DB8;
+  --pingala:   #D97757;
+  --sushumna:  #56A67A;
+
+  /* Trigunas */
+  --sattva:    #C9A84C;   /* gold — clarity/light */
+  --rajas:     #C75C5C;   /* red-coral — activity/passion */
+  --tamas:     #5A6DAA;   /* deep blue-gray — inertia/heaviness */
+
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.04);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.05);
+
+  --font:      -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-serif: Georgia, 'Times New Roman', serif;
+  --transition: 0.55s cubic-bezier(0.4,0,0.2,1);
+}
+
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.5;
+}

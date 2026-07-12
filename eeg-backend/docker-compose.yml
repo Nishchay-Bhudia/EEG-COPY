@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: neuroyogic
+      POSTGRES_PASSWORD: neuroyogic
+      POSTGRES_DB: neuroyogic
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neuroyogic"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Database__Provider: Postgres
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=neuroyogic;Username=neuroyogic;Password=neuroyogic"
+      # CHANGE THIS in real deployments (>= 32 chars):
+      Jwt__SigningKey: "compose-dev-signing-key-change-me-please-32chars!"
+      Cors__Origins__0: "http://localhost:3000"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

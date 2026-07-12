@@ -1,0 +1,58 @@
+name: CI
+
+# Build + test both halves of the monorepo on every push and PR to main.
+# No secrets required — this is the quality gate the Deploy workflow waits on.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: .NET backend (build + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eeg-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore NeuroYogic.sln
+      - name: Build
+        run: dotnet build NeuroYogic.sln -c Release --no-restore
+      - name: Test
+        run: dotnet test NeuroYogic.sln -c Release --no-build --verbosity normal
+
+  frontend:
+    name: eeg-ui (server lint + SPA build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            eeg-ui/package-lock.json
+            eeg-ui/web/package-lock.json
+      - name: Install server deps
+        working-directory: eeg-ui
+        run: npm ci
+      - name: Syntax-check server
+        working-directory: eeg-ui
+        run: |
+          node --check api/server.js
+          node --check dev-server.js
+      - name: Install + build Vue SPA
+        working-directory: eeg-ui/web
+        run: |
+          npm ci
+          npm run build

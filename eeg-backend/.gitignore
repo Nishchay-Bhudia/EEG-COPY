@@ -1,0 +1,38 @@
+# .NET build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+project.lock.json
+artifacts/
+
+# Test results / coverage
+[Tt]est[Rr]esults/
+coverage/
+*.trx
+*.coverage
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.vs/
+.idea/
+*.suo
+
+# Python (legacy reference implementation)
+__pycache__/
+*.pyc
+.venv/
+venv/
+mock_eeg_data.csv
+
+# Env / secrets
+.env
+appsettings.*.local.json
+
+# Claude Code local config / skills
+.claude/

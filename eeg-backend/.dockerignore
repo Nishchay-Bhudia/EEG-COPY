@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.idea/
+**/*.user
+**/TestResults/
+*.db
+*.db-shm
+*.db-wal
+.git/
+.github/
+neuro_yogic/
+scripts/
+__pycache__/
+*.md

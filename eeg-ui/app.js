@@ -1,0 +1,2782 @@
+/* ════════════════════════════════════════════════════════════════════════════
+ EEG DEV TESTING — app.js
+ Modes: demo | bluetooth+backend | bluetooth-local | backend-url
+ Auth: Login → Session management → Admin dashboard (dedicated page)
+ New: Trigunas display, Session epoch storage, Admin session analytics
+════════════════════════════════════════════════════════════════════════════ */
+
+'use strict';
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const SAMPLE_RATE = 256;
+// Analysis window per epoch. Longer = each state reading holds longer on screen
+// and is a steadier estimate (less flip-flop between adjacent states).
+const COLLECT_SECS = 4;
+const COLLECT_N = SAMPLE_RATE * COLLECT_SECS;
+const WAVE_LEN = 300;
+const DEMO_INTERVAL = 1200;
+
+const MUSE_SERVICE_UUID = '0000fe8d-0000-1000-8000-00805f9b34fb';
+const MUSE_CONTROL_UUID = '273e0001-4c4d-454d-96be-f03bac821358';
+const MUSE_EEG_UUIDS = [
+  '273e0003-4c4d-454d-96be-f03bac821358',
+  '273e0004-4c4d-454d-96be-f03bac821358',
+  '273e0005-4c4d-454d-96be-f03bac821358',
+  '273e0006-4c4d-454d-96be-f03bac821358',
+];
+
+// Muse S PPG UUIDs for heart rate and SpO2
+const MUSE_PPG_UUIDS = {
+  ambient: '273e000f-4c4d-454d-96be-f03bac821358',
+  ir:      '273e0010-4c4d-454d-96be-f03bac821358',
+  red:     '273e0011-4c4d-454d-96be-f03bac821358',
+};
+const PPG_SAMPLE_RATE = 64;
+const PPG_WINDOW_SAMPLES = PPG_SAMPLE_RATE * 8; // 8-second window
+
+// BrainBit (4-channel dry EEG, 250 Hz). Protocol per the vendor's web SDK.
+const BRAINBIT_SERVICE_UUID = '6e400001-b534-f393-68a9-e50e24dcca9e';
+const BRAINBIT_STATUS_UUID  = '6e400002-b534-f393-68a9-e50e24dcca9e'; // notify status/battery
+const BRAINBIT_COMMAND_UUID = '6e400003-b534-f393-68a9-e50e24dcca9e'; // write commands
+const BRAINBIT_SIGNAL_UUID  = '6e400004-b534-f393-68a9-e50e24dcca9e'; // notify EEG
+// SIGNAL-mode scale → volts: 2.4 V reference / (0xFFFFF full-scale × gain 6).
+const BRAINBIT_SIGNAL_MULT = 2.4 / (0xFFFFF * 6);
+const BRAINBIT_CMD_STOP   = new Uint8Array([1]);          // stop everything
+const BRAINBIT_CMD_SIGNAL = new Uint8Array([2, 0, 0, 0, 0]); // start signal mode
+
+const DEPTH_PCT = { 'Deep Inertia': 3, Surface: 12, Emerging: 37, Deep: 62, Profound: 94 };
+const CHITTA_DEPTHS = { Mudha: 'Deep Inertia', Kshipta: 'Surface', Vikshipta: 'Emerging', Ekagra: 'Deep', Niruddha: 'Profound' };
+const SWARA_NOTES = {
+  ida: 'Parasympathetic dominance. Receptive, creative and introspective state.',
+  pingala: 'Sympathetic dominance. Active, analytical and goal-directed focus.',
+  sushumna: 'Equilibrium of solar and lunar channels. Gateway to higher contemplative states.',
+};
+
+// ── App state ─────────────────────────────────────────────────────────────────
+let mode = 'idle';
+let backendUrl = localStorage.getItem('controlhub_url') || 'https://eeg-backend-5.onrender.com';
+let btDevice = null;
+let btDisconnect = null;
+let activeDriver = null;              // the headband driver in use this connection
+let activeSampleRate = SAMPLE_RATE;   // per-device Hz (Muse 256, BrainBit 250, …)
+let demoTimer = null;
+let epoch = 0;
+let demoStateIdx = 0;
+let demoSwaraIdx = 0;
+let demoEpoch = 0;
+let pollTimer = null;
+let sseSource = null;
+let backendPollTimer = null;
+
+// Auth state
+let currentUser = null; // { id, username, role }
+
+// Session state
+let activeSession = null; // { id, name, startTime }
+let sessionTimerInterval = null;
+let notesSaveTimeout = null;
+let sessionEpochCounter = 0;
+let sessionStartTimestamp = null;
+
+// Admin page state
+let adminCurrentTab = 'users';
+let resetPwTargetUserId = null;
+
+const bleChannels = [[], [], [], []];
+let blePhase = 0;
+let bleSamTick = 0;
+
+// PPG state (Muse S heart rate / SpO2)
+    const ppgBuf = { ambient: [], ir: [], red: [] };
+    let latestHeartRate = null;
+    let latestSpO2 = null;
+
+    const waveBuf = new Float32Array(WAVE_LEN);
+let waveTail = 0;
+let wavePhase = 0;
+
+// Band power state — updated each epoch; used by drawWave for live bar display
+let lastBandPowers = { delta: 0.15, theta: 0.18, alpha: 0.28, low_beta: 0.18, high_beta: 0.13, gamma: 0.08 };
+
+// Replay Player state
+let replayEpochs = [];
+let replayIndex = 0;
+let replayTimer = null;
+let replayPlaying = false;
+let replaySpeed = 1;                 // playback multiplier (0.5×–4×)
+let replaySessionId = null;          // session shown in the Replay view
+let pendingReplaySessionId = null;   // deep-link target from the analytics overlay
+let currentAnalyticsSessionId = null;
+
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+// ── Utility helpers ───────────────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function qAll(selector) { return Array.from(document.querySelectorAll(selector)); }
+
+function formatDate(isoStr) {
+  if (!isoStr) return '—';
+  return new Date(isoStr).toLocaleString();
+}
+
+function formatDuration(secs) {
+  if (!secs) return '—';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}m ${s}s`;
+}
+
+function formatTime(seconds) {
+  if (seconds == null) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = {
+    method,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch('/api' + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed'), { status: res.status });
+  return data;
+}
+
+// ── AUTH ──────────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  try {
+    currentUser = await api('GET', '/auth/me');
+    enterApp();
+  } catch {
+    showLoginScreen();
+  }
+}
+
+// ── View router ────────────────────────────────────────────────────────────────
+// Single source of navigation truth. Each view maps to a [data-view] section and a
+// [data-nav] sidebar button; onShow runs each time the view is entered. Later phases
+// register their render fns as onShow hooks against the stub views.
+const VIEWS = {
+  dashboard: { title: 'Live Monitor',     onShow: onShowDashboard },
+  home:      { title: 'This Week', onShow: onShowHome },
+  cohort:    { title: 'Cohort',    onShow: onShowCohort },
+  client:    { title: 'Clients',   onShow: onShowClient },
+  replay:    { title: 'Replay', onShow: onShowReplay },
+  analyze:   { title: 'Analyze', onShow: onShowAnalyze },
+  prescribe: { title: 'Prescribe' },
+  admin:     { title: 'Admin Dashboard', elevatedOnly: true, onShow: onShowAdmin },
+};
+
+let currentView = null;
+
+function isElevatedRole() {
+  return !!currentUser && (currentUser.role === 'admin' || currentUser.role === 'co-admin');
+}
+
+function showView(name) {
+  let view = VIEWS[name];
+  if (!view) { name = 'dashboard'; view = VIEWS.dashboard; }
+  // Guard elevated-only views (defence in depth — nav item is also hidden)
+  if (view.elevatedOnly && !isElevatedRole()) { name = 'dashboard'; view = VIEWS.dashboard; }
+
+  // Leaving the replay view: stop the playback timer to avoid a leak.
+  if (currentView === 'replay' && name !== 'replay' && typeof stopReplay === 'function') stopReplay();
+
+  qAll('[data-view]').forEach(el => el.classList.toggle('is-active', el.dataset.view === name));
+  qAll('[data-nav]').forEach(el => el.classList.toggle('is-active', el.dataset.nav === name));
+  const titleEl = $('topbar-title');
+  if (titleEl) titleEl.textContent = view.title;
+  currentView = name;
+  if (view.onShow) view.onShow();
+}
+
+function onShowDashboard() {
+  // canvas must be re-measured whenever the dashboard becomes visible again
+  resizeCanvas();
+}
+
+function onShowAdmin() {
+  const isCoAdmin = currentUser.role === 'co-admin';
+  const usersTabBtn = document.querySelector('.admin-tab[data-tab="users"]');
+  if (usersTabBtn) usersTabBtn.style.display = isCoAdmin ? 'none' : '';
+  const targetTab = isCoAdmin ? 'sessions' : adminCurrentTab;
+  openAdminTab(targetTab);
+}
+
+// ── Auth screen gating ──────────────────────────────────────────────────────────
+let waveLoopStarted = false;
+
+function showLoginScreen() {
+  $('login-screen').style.display = 'flex';
+  $('app-shell').style.display = 'none';
+}
+
+// One-time setup when entering the app after a successful auth.
+function enterApp() {
+  $('login-screen').style.display = 'none';
+  $('app-shell').style.display = 'flex';
+
+  $('user-avatar-initial').textContent = (currentUser.username[0] || '?').toUpperCase();
+  $('user-display-name').textContent = currentUser.username;
+  $('user-menu-role').textContent = currentUser.role;
+
+  const elevated = isElevatedRole();
+  $('btn-open-admin').style.display = elevated ? '' : 'none';
+  const adminNav = document.querySelector('.nav__item[data-nav="admin"]');
+  if (adminNav) adminNav.style.display = elevated ? '' : 'none';
+  $('btn-ai-baba').style.display = '';
+
+  resizeCanvas();
+  if (!waveLoopStarted) { waveLoopStarted = true; requestAnimationFrame(drawWave); }
+  $('val-buffer').textContent = '0 / ' + COLLECT_N;
+
+  if (backendUrl) {
+    $('input-backend-url').value = backendUrl;
+    // Ping once to show backend status, but don't force 'backend' mode — conflicts with BT
+    pingBackendStatus(backendUrl);
+  }
+
+  loadSessionHistory();
+  loadClientOptions();
+  showView('dashboard');
+}
+
+// Populate the command-bar client picker from the cohort (P1 endpoint).
+async function loadClientOptions() {
+  const sel = $('session-client-select');
+  if (!sel) return;
+  try {
+    const clients = await api('GET', '/clients');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">No client</option>' +
+      clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+    sel.value = current; // preserve selection across refreshes
+  } catch (_) { /* leave the default "No client" option */ }
+}
+
+// Back-compat shims — existing call sites keep working (admin button, back-to-dashboard).
+function showMainApp()  { showView('dashboard'); }
+function showAdminPage() { showView('admin'); }
+
+// Sidebar navigation
+document.addEventListener('click', e => {
+  const nav = e.target.closest('[data-nav]');
+  if (nav) showView(nav.dataset.nav);
+});
+
+// Toast — reusable notification primitive used by later phases.
+let toastTimer = null;
+function showToast(msg) {
+  const t = $('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('is-show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('is-show'), 2600);
+}
+
+// ── Login form ────────────────────────────────────────────────────────────────
+$('btn-login').addEventListener('click', async () => {
+  const username = $('input-username').value.trim();
+  const password = $('input-password').value;
+  const errEl = $('login-error');
+  errEl.style.display = 'none';
+  $('btn-login').disabled = true;
+  $('btn-login').textContent = 'Signing in…';
+
+  try {
+    currentUser = await api('POST', '/auth/login', { username, password });
+    enterApp();
+  } catch (err) {
+    errEl.textContent = err.message || 'Login failed';
+    errEl.style.display = '';
+  } finally {
+    $('btn-login').disabled = false;
+    $('btn-login').textContent = 'Sign In';
+  }
+});
+
+$('input-password').addEventListener('keydown', e => {
+  if (e.key === 'Enter') $('btn-login').click();
+});
+
+// ── User menu ─────────────────────────────────────────────────────────────────
+$('btn-user-menu').addEventListener('click', e => {
+  e.stopPropagation();
+  const dd = $('user-dropdown');
+  dd.style.display = dd.style.display === 'none' ? '' : 'none';
+});
+
+document.addEventListener('click', () => {
+  $('user-dropdown').style.display = 'none';
+});
+
+$('btn-logout').addEventListener('click', async () => {
+  await api('POST', '/auth/logout').catch(() => {});
+  currentUser = null;
+  activeSession = null;
+  clearInterval(sessionTimerInterval);
+  showLoginScreen();
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+$('btn-settings').addEventListener('click', () => {
+  $('settings-overlay').classList.toggle('open');
+});
+
+$('btn-close-settings').addEventListener('click', () => {
+  $('settings-overlay').classList.remove('open');
+});
+
+$('settings-overlay').addEventListener('click', e => {
+  if (e.target === $('settings-overlay')) $('settings-overlay').classList.remove('open');
+});
+
+$('btn-test').addEventListener('click', async () => {
+  const url = $('input-backend-url').value.trim().replace(/\/$/, '');
+  const testEl = $('test-msg');
+  if (!url) { alert('Enter a URL first.'); return; }
+  testEl.style.display = '';
+  testEl.style.color = 'var(--text-muted)';
+  testEl.textContent = 'Testing…';
+  try {
+    const res = await fetch(url + '/status', { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    testEl.style.color = '#56A67A';
+    testEl.textContent = '✓ Connected — board: ' + (data.board || 'web-bluetooth') + (data.model_ready ? ' | model ready' : ' | model loading…');
+  } catch (e) {
+    testEl.style.color = '#C75C5C';
+    testEl.textContent = '✗ ' + (e.message || 'connection failed');
+  }
+});
+
+$('btn-save').addEventListener('click', () => {
+  const url = $('input-backend-url').value.trim().replace(/\/$/, '');
+  if (!url) { alert('Enter a URL first.'); return; }
+  backendUrl = url;
+  localStorage.setItem('controlhub_url', url);
+  $('settings-overlay').classList.remove('open');
+  connectBackendUrl(url);
+});
+
+// ── Admin page navigation ─────────────────────────────────────────────────────
+$('btn-open-admin').addEventListener('click', () => { showAdminPage(); });
+$('btn-back-to-dashboard').addEventListener('click', () => { showMainApp(); });
+
+qAll('.admin-tab').forEach(tab => {
+  tab.addEventListener('click', () => { openAdminTab(tab.dataset.tab); });
+});
+
+function openAdminTab(tabName) {
+  if (tabName === 'users' && currentUser.role === 'co-admin') tabName = 'sessions';
+  adminCurrentTab = tabName;
+  qAll('.admin-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
+  $('admin-tab-users').style.display = tabName === 'users' ? '' : 'none';
+  $('admin-tab-sessions').style.display = tabName === 'sessions' ? '' : 'none';
+  if (tabName === 'users') loadAdminUsers();
+  if (tabName === 'sessions') loadAdminSessions();
+}
+
+// ── Admin: Users tab ──────────────────────────────────────────────────────────
+$('btn-add-user').addEventListener('click', () => {
+  $('create-user-form').style.display = '';
+  $('create-user-error').style.display = 'none';
+  $('new-username').value = '';
+  $('new-password').value = '';
+  $('new-role').value = 'user';
+});
+
+$('btn-cancel-create-user').addEventListener('click', () => {
+  $('create-user-form').style.display = 'none';
+});
+
+$('btn-create-user').addEventListener('click', async () => {
+  const username = $('new-username').value.trim();
+  const password = $('new-password').value;
+  const role = $('new-role').value;
+  const errEl = $('create-user-error');
+  errEl.style.display = 'none';
+
+  if (!username || !password) {
+    errEl.textContent = 'Username and password required.';
+    errEl.style.display = '';
+    return;
+  }
+
+  try {
+    await api('POST', '/users', { username, password, role });
+    $('create-user-form').style.display = 'none';
+    await loadAdminUsers();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = '';
+  }
+});
+
+$('btn-cancel-reset-pw').addEventListener('click', () => {
+  $('reset-pw-form').style.display = 'none';
+  resetPwTargetUserId = null;
+});
+
+$('btn-save-reset-pw').addEventListener('click', async () => {
+  if (!resetPwTargetUserId) return;
+  const pw = $('reset-pw-input').value;
+  if (!pw) { alert('Enter a password.'); return; }
+  try {
+    await api('PUT', '/users/' + resetPwTargetUserId + '/password', { password: pw });
+    $('reset-pw-form').style.display = 'none';
+    resetPwTargetUserId = null;
+    $('reset-pw-input').value = '';
+    alert('Password updated.');
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
+});
+
+async function loadAdminUsers() {
+  const tbody = $('admin-users-tbody');
+  tbody.innerHTML = '<tr><td colspan="5">Loading…</td></tr>';
+  try {
+    const users = await api('GET', '/users');
+    tbody.innerHTML = '';
+    if (!users.length) {
+      tbody.innerHTML = '<tr><td colspan="5">No users found.</td></tr>';
+      return;
+    }
+    users.forEach(u => {
+      const isSelf = u.id === currentUser.id;
+      const roleClass = 'role-' + u.role.replace('-', '_');
+      const roleSelector = !isSelf ? `
+        <select class="field-input field-input-xs" data-action="select-role">
+          <option value="user" ${u.role==='user'?'selected':''}>user</option>
+          <option value="co-admin" ${u.role==='co-admin'?'selected':''}>co-admin</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
+        </select>
+        <button class="btn btn-primary btn-sm" data-action="change-role" data-uid="${u.id}">Apply</button>
+      ` : '';
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><strong>${escHtml(u.username)}</strong></td>
+        <td><span class="role-badge ${roleClass}">${escHtml(u.role)}</span></td>
+        <td>${formatDate(u.createdAt)}</td>
+        <td>
+          <div class="table-actions">
+            ${roleSelector}
+          </div>
+        </td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-ghost btn-sm" data-action="reset-pw" data-uid="${u.id}">Reset PW</button>
+            ${!isSelf
+              ? `<button class="btn btn-danger btn-sm" data-action="delete-user" data-uid="${u.id}">Delete</button>`
+              : '<span class="role-badge role-user">you</span>'}
+          </div>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="5">${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+$('admin-users-tbody').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const uid = parseInt(btn.dataset.uid, 10);
+  const action = btn.dataset.action;
+
+  if (action === 'reset-pw') {
+    resetPwTargetUserId = uid;
+    $('reset-pw-input').value = '';
+    $('reset-pw-form').style.display = '';
+    $('reset-pw-input').focus();
+  } else if (action === 'delete-user') {
+    if (!confirm('Delete this user? This cannot be undone.')) return;
+    try {
+      await api('DELETE', '/users/' + uid);
+      await loadAdminUsers();
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  } else if (action === 'change-role') {
+    const row = btn.closest('tr');
+    const select = row.querySelector('[data-action="select-role"]');
+    if (!select) return;
+    const newRole = select.value;
+    if (!confirm(`Change this user's role to "${newRole}"?`)) return;
+    try {
+      await api('PUT', '/users/' + uid + '/role', { role: newRole });
+      await loadAdminUsers();
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  }
+});
+
+// ── Admin: Sessions tab ───────────────────────────────────────────────────────
+$('admin-sessions-search').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  qAll('#admin-sessions-tbody tr').forEach(tr => {
+    const user = tr.querySelector('[data-username]')?.dataset.username || '';
+    tr.style.display = user.includes(q) ? '' : 'none';
+  });
+});
+
+async function loadAdminSessions() {
+  const tbody = $('admin-sessions-tbody');
+  tbody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+  try {
+    const sessions = await api('GET', '/sessions');
+    tbody.innerHTML = '';
+    if (!sessions.length) {
+      tbody.innerHTML = '<tr><td colspan="6">No sessions yet.</td></tr>';
+      return;
+    }
+    sessions.forEach(s => {
+      const tr = document.createElement('tr');
+      tr.dataset.username = (s.username || '').toLowerCase();
+      tr.innerHTML = `
+        <td data-username="${escHtml(s.username || '')}">${escHtml(s.username || '?')}</td>
+        <td><strong>${escHtml(s.name)}</strong></td>
+        <td>${formatDate(s.startTime)}</td>
+        <td>${s.duration ? formatDuration(s.duration) : (s.endTime ? '—' : '<em>active</em>')}</td>
+        <td><span class="epoch-badge" id="epoch-count-${s.id}">—</span></td>
+        <td>
+          <button class="btn btn-secondary btn-sm" data-action="view-analytics" data-sid="${s.id}" data-sname="${escHtml(s.name)}">
+            View Analytics
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    loadEpochCounts(sessions);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6">${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function loadEpochCounts(sessions) {
+  await Promise.allSettled(sessions.map(async s => {
+    try {
+      const data = await api('GET', '/sessions/' + s.id + '/analytics');
+      const el = $('epoch-count-' + s.id);
+      if (el) el.textContent = data.summary?.totalEpochs ?? 0;
+    } catch { /* ignore */ }
+  }));
+}
+
+$('admin-sessions-tbody').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action="view-analytics"]');
+  if (!btn) return;
+  const sid = parseInt(btn.dataset.sid, 10);
+  const sname = btn.dataset.sname;
+  openSessionAnalytics(sid, sname);
+});
+
+// ── Session Analytics Overlay ─────────────────────────────────────────────────
+$('btn-close-analytics').addEventListener('click', () => {
+  $('analytics-overlay').style.display = 'none';
+  stopReplay();
+});
+
+$('analytics-overlay').addEventListener('click', e => {
+  if (e.target === $('analytics-overlay')) {
+    $('analytics-overlay').style.display = 'none';
+    stopReplay();
+  }
+});
+
+function setAnalyticsState(state) {
+  // state: 'loading' | 'error' | 'content'
+  $('analytics-loading').style.display = state === 'loading' ? '' : 'none';
+  $('analytics-error').style.display = state === 'error' ? '' : 'none';
+  $('analytics-content').style.display = state === 'content' ? '' : 'none';
+}
+
+async function openSessionAnalytics(sessionId, sessionName) {
+  currentAnalyticsSessionId = sessionId;
+  $('analytics-session-name').textContent = sessionName || 'Session';
+  $('analytics-session-meta').textContent = '';
+  $('analytics-overlay').style.display = '';
+  setAnalyticsState('loading');
+
+  try {
+    const data = await api('GET', '/sessions/' + sessionId + '/analytics');
+    renderAnalyticsSummary(data.summary || {});
+    renderAnalyticsTimeline(data.phases || []);
+    setAnalyticsState('content');
+    loadAnalyticsNotes(sessionId);
+  } catch (err) {
+    $('analytics-error').textContent = err.message;
+    setAnalyticsState('error');
+  }
+}
+
+function pct(v) { return v != null ? Math.round(v * 100) + '%' : '—'; }
+
+function renderAnalyticsSummary(s) {
+  $('a-total-epochs').textContent = s.totalEpochs ?? '—';
+  $('a-duration').textContent = s.durationSeconds ? formatDuration(s.durationSeconds) : '—';
+  $('a-dominant-guna').textContent = s.dominantGuna ? capitalize(s.dominantGuna) : '—';
+  $('a-dominant-state').textContent = s.dominantState ?? '—';
+  $('a-avg-spo2').textContent = s.avgSpo2 != null ? s.avgSpo2.toFixed(1) : '—';
+  $('a-avg-hr').textContent = s.avgHr != null ? s.avgHr.toFixed(0) : '—';
+
+  const gunas = s.avgGunas || {};
+  ['sattva', 'rajas', 'tamas'].forEach(g => {
+    const barEl = $('a-bar-' + g);
+    const pctEl = $('a-pct-' + g);
+    if (barEl) barEl.style.width = (gunas[g] != null ? Math.round(gunas[g] * 100) : 0) + '%';
+    if (pctEl) pctEl.textContent = pct(gunas[g]);
+  });
+
+  renderBreakdown('a-state-breakdown', s.stateCounts || {}, s.totalEpochs || 0);
+  renderBreakdown('a-swara-breakdown', s.swaraCounts || {}, s.totalEpochs || 0);
+
+  const bandsEl = $('a-avg-bands');
+  if (bandsEl) {
+    const syms = { delta: 'δ', theta: 'θ', alpha: 'α', beta: 'β', gamma: 'γ' };
+    const avgBands = s.avgBands || {};
+    bandsEl.innerHTML = ['delta', 'theta', 'alpha', 'beta', 'gamma'].map(b => `
+      <div class="analytics-band-pill">
+        <span class="analytics-band-sym">${syms[b]}</span>
+        <span class="analytics-band-name">${b}</span>
+        <span class="analytics-band-val">${pct(avgBands[b])}</span>
+      </div>
+    `).join('');
+  }
+}
+
+function renderBreakdown(containerId, counts, total) {
+  const el = $(containerId);
+  if (!el) return;
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No data.</p>'; return; }
+  el.innerHTML = entries.map(([label, count]) => {
+    const p = total ? Math.round((count / total) * 100) : 0;
+    return `
+      <div class="breakdown-item">
+        <span class="breakdown-label">${escHtml(label)}</span>
+        <div class="breakdown-bar-bg"><div class="breakdown-bar" style="width:${p}%"></div></div>
+        <span class="breakdown-pct">${p}%</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+function renderAnalyticsTimeline(phases) {
+  const el = $('a-timeline');
+  if (!el) return;
+  if (!phases.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No phase data.</p>'; return; }
+  el.innerHTML = phases.map(p => `
+    <div class="timeline-phase">
+      <strong>${escHtml(p.state)}</strong>
+      <span>${escHtml(p.depth || '')}</span>
+      <span>${formatTime(p.fromSeconds)} – ${formatTime(p.toSeconds)}</span>
+      <span>${p.epochCount} epochs</span>
+    </div>
+  `).join('');
+}
+
+// ── Session Notes (analytics modal) ───────────────────────────────────────────
+async function loadAnalyticsNotes(sessionId) {
+  const el = $('a-notes-content');
+  if (!el) return;
+  try {
+    const data = await api('GET', '/sessions/' + sessionId + '/notes');
+    el.innerHTML = data.content
+      ? escHtml(data.content).replace(/\n/g, '<br>')
+      : '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
+  } catch {
+    el.innerHTML = '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
+  }
+}
+
+// ── Replay Player ─────────────────────────────────────────────────────────────
+$('replay-prev').addEventListener('click', () => { updateReplayDisplay(replayIndex - 1); });
+$('replay-next').addEventListener('click', () => { updateReplayDisplay(replayIndex + 1); });
+$('replay-play-pause').addEventListener('click', () => {
+  if (replayPlaying) stopReplay(); else startReplay();
+});
+$('replay-slider').addEventListener('input', e => { updateReplayDisplay(parseInt(e.target.value, 10)); });
+$('replay-session-select').addEventListener('change', e => { replaySessionId = e.target.value; loadReplayData(); });
+$('replay-speed').addEventListener('change', e => {
+  replaySpeed = parseFloat(e.target.value) || 1;
+  if (replayPlaying) { stopReplay(); startReplay(); } // re-arm timer at new cadence
+});
+// Keyboard transport — only while the Replay view is active.
+document.addEventListener('keydown', e => {
+  if (currentView !== 'replay') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); replayPlaying ? stopReplay() : startReplay(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); updateReplayDisplay(replayIndex - 1); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); updateReplayDisplay(replayIndex + 1); }
+});
+
+// "Open in Replay ↗" from the analytics overlay → deep-link into the Replay view.
+$('btn-open-replay').addEventListener('click', () => {
+  pendingReplaySessionId = currentAnalyticsSessionId;
+  const overlay = $('analytics-overlay');
+  if (overlay) overlay.style.display = 'none';
+  stopReplay();
+  showView('replay');
+});
+
+// Populate the Replay view's session picker and load the (deep-linked or first) session.
+async function onShowReplay() {
+  const sel = $('replay-session-select');
+  if (!sel) return;
+  try {
+    const sessions = await api('GET', '/sessions/mine');
+    if (!sessions.length) { sel.innerHTML = '<option value="">No sessions</option>'; replaySessionId = null; showReplayNoData(); return; }
+    sel.innerHTML = sessions.map(s =>
+      `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
+    const target = pendingReplaySessionId || replaySessionId || sessions[0].id;
+    pendingReplaySessionId = null;
+    if (sessions.some(s => String(s.id) === String(target))) sel.value = String(target);
+    replaySessionId = sel.value;
+    await loadReplayData();
+  } catch (err) {
+    showReplayNoData();
+  }
+}
+
+function startReplay() {
+  if (!replayEpochs.length) return;
+  // If parked at the end, restart from the top instead of dead-stopping.
+  if (replayIndex >= replayEpochs.length - 1) updateReplayDisplay(0);
+  replayPlaying = true;
+  $('replay-play-pause').textContent = '⏸ Pause';
+  replayTimer = setInterval(() => {
+    if (replayIndex >= replayEpochs.length - 1) { stopReplay(); return; }
+    updateReplayDisplay(replayIndex + 1);
+  }, 1500 / replaySpeed);
+}
+
+function stopReplay() {
+  replayPlaying = false;
+  clearInterval(replayTimer); replayTimer = null;
+  $('replay-play-pause').textContent = '▶ Play';
+}
+
+async function loadReplayData() {
+  stopReplay();
+  replayEpochs = [];
+  replayIndex = 0;
+  const noData = $('replay-no-data');
+  const stateDisplay = $('replay-state-display');
+  const slider = $('replay-slider');
+  const sid = replaySessionId;
+
+  if (!sid) { showReplayNoData(); return; }
+
+  try {
+    const data = await api('GET', '/sessions/' + sid + '/epochs');
+    replayEpochs = Array.isArray(data) ? data : (data.epochs || []);
+  } catch {
+    showReplayNoData();
+    return;
+  }
+
+  // Session-level readout: phase scrubber + honest metrics strip from /analytics.
+  try {
+    const a = await api('GET', '/sessions/' + sid + '/analytics');
+    renderReplayScrubber(a.phases || [], a.summary?.durationSeconds || 0);
+    renderReplayMetrics(a.summary || {});
+    const metaEl = $('replay-view-meta');
+    if (metaEl) metaEl.textContent = a.summary?.totalEpochs
+      ? `${a.summary.totalEpochs} epochs · ${formatDuration(a.summary.durationSeconds || 0)}` : '';
+  } catch { /* scrubber/metrics are enrichments — replay still works without them */ }
+
+  if (!replayEpochs.length) { showReplayNoData(); return; }
+
+  if (noData) noData.style.display = 'none';
+  if (stateDisplay) stateDisplay.style.display = '';
+  if (slider) {
+    slider.max = replayEpochs.length - 1;
+    slider.value = 0;
+  }
+  updateReplayDisplay(0);
+}
+
+// Phase-colored track behind the scrubber, positioned by each phase's time span.
+function renderReplayScrubber(phases, totalSeconds) {
+  const track = $('replay-scrubber');
+  if (!track) return;
+  const colors = { Mudha:'#8A8F98', Kshipta:'var(--kshipta)', Vikshipta:'var(--vikshipta)', Ekagra:'var(--ekagra)', Niruddha:'var(--niruddha)' };
+  const total = totalSeconds > 0 ? totalSeconds : null;
+  if (!phases.length || !total) { track.innerHTML = ''; return; }
+  track.innerHTML = phases.map(p => {
+    const from = p.fromSeconds ?? 0, to = p.toSeconds ?? from;
+    const left = Math.max(0, Math.min(100, from / total * 100));
+    const width = Math.max(0.5, Math.min(100 - left, (to - from) / total * 100));
+    const col = colors[p.state] || 'var(--text-muted)';
+    return `<span class="scrubber__phase" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${col}" title="${escHtml(p.state)}"></span>`;
+  }).join('');
+}
+
+// Honest session metrics — only real /analytics fields (no fabricated coherence/σ).
+function renderReplayMetrics(s) {
+  const strip = $('replay-metrics');
+  if (!strip) return;
+  const cells = [
+    ['Dominant state', s.dominantState || '—'],
+    ['Dominant guṇa', s.dominantGuna ? capitalize(s.dominantGuna) : '—'],
+    ['Avg SpO₂', s.avgSpo2 != null ? s.avgSpo2.toFixed(1) + '%' : '—'],
+    ['Avg HR', s.avgHr != null ? Math.round(s.avgHr) + ' bpm' : '—'],
+    ['Epochs', s.totalEpochs != null ? String(s.totalEpochs) : '—'],
+  ];
+  strip.innerHTML = cells.map(([k, v]) =>
+    `<div class="metrics-strip__cell"><span class="metrics-strip__label">${k}</span><span class="metrics-strip__value">${escHtml(String(v))}</span></div>`).join('');
+}
+
+function showReplayNoData() {
+  const noData = $('replay-no-data');
+  const stateDisplay = $('replay-state-display');
+  if (noData) noData.style.display = '';
+  if (stateDisplay) stateDisplay.style.display = 'none';
+  const epochLbl = $('replay-epoch-label');
+  const timeLbl = $('replay-time-label');
+  if (epochLbl) epochLbl.textContent = '—';
+  if (timeLbl) timeLbl.textContent = '—';
+}
+
+function updateReplayDisplay(idx) {
+  if (!replayEpochs.length) return;
+  idx = Math.max(0, Math.min(idx, replayEpochs.length - 1));
+  replayIndex = idx;
+  const ep = replayEpochs[idx];
+  const slider = $('replay-slider');
+  if (slider) slider.value = idx;
+
+  const epochLbl = $('replay-epoch-label');
+  const timeLbl = $('replay-time-label');
+  if (epochLbl) epochLbl.textContent = `${idx + 1} / ${replayEpochs.length}`;
+  if (timeLbl) timeLbl.textContent = ep.elapsedSeconds != null ? formatTime(ep.elapsedSeconds) : '—';
+
+  // Replay into the main display
+  const ch = ep.chittaBhumi ? { state: ep.chittaBhumi, depth: ep.contemplativeDepth, confidence: ep.chittaConfidence, probabilities: {} } : {};
+  const sw = ep.swara ? { state: ep.swara, confidence: ep.swaraConfidence, note: '' } : {};
+  applyReading({
+    epoch: ep.epochNum,
+    chitta_bhumi: ch,
+    swara: sw,
+    band_powers: { relative: ep.bands || {} },
+    eeg_spectrum: ep.bands || {},
+    tattva_flags: ep.tattvaFlags || [],
+    contemplative_depth: ep.contemplativeDepth,
+    alpha_asymmetry: 0,
+    gunas: ep.gunas || null,
+    blood_oxygen: ep.bloodOxygen,
+    heart_rate: ep.heartRate,
+    latency_ms: null,
+    data_quality: '⏪ replay',
+  });
+
+  // Replay state summary panel
+  const stateValEl = $('replay-state-val');
+  const swaraValEl = $('replay-swara-val');
+  const gunaValEl = $('replay-guna-val');
+  const alphaValEl = $('replay-alpha-val');
+  const spo2ValEl = $('replay-spo2-val');
+  const hrValEl = $('replay-hr-val');
+  if (stateValEl) stateValEl.textContent = ep.chittaBhumi || '—';
+  if (swaraValEl) swaraValEl.textContent = ep.swara || '—';
+  if (gunaValEl) gunaValEl.textContent = ep.gunas?.label || '—';
+  if (alphaValEl) alphaValEl.textContent = ep.bands?.alpha != null ? Math.round(ep.bands.alpha * 100) + '%' : '—';
+  if (spo2ValEl) spo2ValEl.textContent = ep.bloodOxygen != null ? ep.bloodOxygen.toFixed(1) + '%' : '—';
+  if (hrValEl) hrValEl.textContent = ep.heartRate != null ? ep.heartRate.toFixed(0) + ' bpm' : '—';
+}
+
+// ── Session management ────────────────────────────────────────────────────────
+$('btn-start-session').addEventListener('click', async () => {
+  const name = prompt('Session name:', 'Session ' + new Date().toLocaleDateString());
+  if (name === null) return;
+
+  try {
+    const clientSel = $('session-client-select');
+    const clientId = clientSel && clientSel.value ? clientSel.value : null;
+    const sess = await api('POST', '/sessions/start', { name: name.trim() || 'New Session', client_id: clientId });
+    activeSession = sess;
+    sessionStartTimestamp = new Date();
+    sessionEpochCounter = 0;
+
+    $('session-name-display').textContent = sess.name;
+    $('session-status').style.display = '';
+    $('btn-start-session').style.display = 'none';
+    $('btn-end-session').style.display = '';
+    $('session-notes').value = '';
+    $('session-notes').disabled = false;
+
+    clearInterval(sessionTimerInterval);
+    sessionTimerInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - sessionStartTimestamp) / 1000);
+      $('session-timer').textContent = formatTime(elapsed);
+    }, 1000);
+    $('session-timer').textContent = '0:00';
+  } catch (err) {
+    alert('Failed to start session: ' + err.message);
+  }
+});
+
+$('btn-end-session').addEventListener('click', async () => {
+  if (!activeSession) return;
+  try {
+    await api('POST', '/sessions/' + activeSession.id + '/end');
+  } catch { /* ignore */ }
+  clearInterval(sessionTimerInterval);
+  activeSession = null;
+  $('session-status').style.display = 'none';
+  $('btn-start-session').style.display = '';
+  $('btn-end-session').style.display = 'none';
+  $('session-notes').disabled = true;
+  await loadSessionHistory();
+});
+
+// ── Session notes autosave (debounced) ────────────────────────────────────────
+$('session-notes').disabled = true;
+$('session-notes').addEventListener('input', () => {
+  if (!activeSession) return;
+  clearTimeout(notesSaveTimeout);
+  notesSaveTimeout = setTimeout(async () => {
+    try {
+      await api('PUT', '/sessions/' + activeSession.id + '/notes', { content: $('session-notes').value });
+    } catch { /* ignore — will retry on next keystroke */ }
+  }, 800);
+});
+
+async function loadSessionHistory() {
+  const list = $('history-list');
+  if (!list) return;
+  try {
+    const sessions = await api('GET', '/sessions/mine');
+    list.innerHTML = '';
+    if (!sessions.length) {
+      list.innerHTML = '<div id="history-empty" class="history-empty">No sessions yet</div>';
+      return;
+    }
+    sessions.slice(0, 5).forEach(s => {
+      const item = document.createElement('div');
+      item.className = 'history-item';
+      item.textContent = `${s.name} — ${formatDate(s.startTime)}`;
+      list.appendChild(item);
+    });
+  } catch { /* ignore */ }
+}
+
+$('btn-toggle-history').addEventListener('click', () => {
+  const list = $('history-list');
+  const btn = $('btn-toggle-history');
+  const isHidden = list.style.display === 'none';
+  list.style.display = isHidden ? '' : 'none';
+  btn.textContent = isHidden ? 'Hide' : 'Show';
+});
+
+// Store epoch to database (fire-and-forget)
+function storeEpochToSession(r) {
+  if (!activeSession || !r) return;
+  sessionEpochCounter++;
+  const elapsedSeconds = sessionStartTimestamp
+    ? (Date.now() - sessionStartTimestamp.getTime()) / 1000
+    : null;
+
+  const ch = r.chitta_bhumi || {};
+  const sw = r.swara || {};
+  const spectrum = r.eeg_spectrum || (r.band_powers && r.band_powers.relative) || {};
+  const gunas = r.gunas || {};
+  const flags = r.tattva_flags || [];
+  const swaraSimple = (sw.state || '').split(' ')[0] || null;
+
+  const epochBody = {
+    epochNum: sessionEpochCounter,
+    elapsedSeconds: elapsedSeconds ? +elapsedSeconds.toFixed(2) : null,
+    chittaBhumi: ch.state || null,
+    chittaConfidence: ch.confidence || null,
+    contemplativeDepth: ch.depth || null,
+    swara: swaraSimple,
+    swaraConfidence: sw.confidence || null,
+    bands: {
+      delta: spectrum.delta ?? null,
+      theta: spectrum.theta ?? null,
+      alpha: spectrum.alpha ?? null,
+      beta: spectrum.beta ?? null,
+      gamma: spectrum.gamma ?? null,
+    },
+    gunas: {
+      sattva: gunas.sattva ?? null,
+      rajas: gunas.rajas ?? null,
+      tamas: gunas.tamas ?? null,
+      label: gunas.label || null,
+    },
+    tattvaFlags: flags || [],
+    bloodOxygen: r.blood_oxygen != null ? r.blood_oxygen : null,
+    heartRate: r.heart_rate != null ? r.heart_rate : null,
+  };
+
+  api('POST', '/sessions/' + activeSession.id + '/epoch', epochBody)
+    .catch(err => console.warn('[Epoch store] failed:', err.message));
+}
+
+// ── Local FFT + classification ────────────────────────────────────────────────
+function fft(signal) {
+  let size = 1;
+  while (size < signal.length) size <<= 1;
+  const re = new Float64Array(size), im = new Float64Array(size);
+  for (let i = 0; i < signal.length; i++) re[i] = signal[i];
+  for (let i = 1, j = 0; i < size; i++) {
+    let bit = size >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i],re[j]]=[re[j],re[i]]; [im[i],im[j]]=[im[j],im[i]]; }
+  }
+  for (let len = 2; len <= size; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wRe = Math.cos(ang), wIm = Math.sin(ang);
+    for (let i = 0; i < size; i += len) {
+      let cRe = 1, cIm = 0;
+      for (let j = 0; j < (len >> 1); j++) {
+        const uRe = re[i+j], uIm = im[i+j], h = i+j+(len>>1);
+        const vRe = re[h]*cRe - im[h]*cIm, vIm = re[h]*cIm + im[h]*cRe;
+        re[i+j]=uRe+vRe; im[i+j]=uIm+vIm; re[h]=uRe-vRe; im[h]=uIm-vIm;
+        const nRe = cRe*wRe - cIm*wIm; cIm = cRe*wIm + cIm*wRe; cRe = nRe;
+      }
+    }
+  }
+  const half = size >> 1, mags = new Array(half);
+  for (let i = 0; i < half; i++) mags[i] = Math.sqrt(re[i]*re[i]+im[i]*im[i]) / size;
+  return mags;
+}
+
+function bandPowers(mags, sr, sz) {
+  const res = sr / sz;
+  const bin = hz => Math.round(hz / res);
+  const sum = (lo, hi) => {
+    let s = 0;
+    for (let b = bin(lo); b <= Math.min(bin(hi), mags.length-1); b++) s += mags[b]*mags[b];
+    return s;
+  };
+  const d=sum(0.5,4), t=sum(4,8), a=sum(8,13), be=sum(13,30), g=sum(30,50);
+  const tot = d+t+a+be+g || 1;
+  return { delta:d/tot, theta:t/tot, alpha:a/tot, beta:be/tot, gamma:g/tot };
+}
+
+function softmax(logits) {
+  const m = Math.max(...logits), ex = logits.map(l=>Math.exp(l-m)), s = ex.reduce((a,b)=>a+b,0);
+  return ex.map(e=>e/s);
+}
+
+function classifyLocal(bp) {
+  const states = ['Kshipta','Vikshipta','Ekagra','Niruddha'];
+  const logits = [
+    bp.beta*3.0 + bp.gamma*1.5 - bp.alpha*1.5,
+    bp.alpha*1.5 + bp.beta*1.5 - bp.theta*0.5,
+    bp.alpha*3.5 + bp.theta*1.0 - bp.beta*2.0,
+    bp.theta*3.0 + bp.delta*2.0 - bp.beta*2.5,
+  ];
+  const probs = softmax(logits);
+  const maxI = probs.indexOf(Math.max(...probs));
+  const state = states[maxI];
+  const probMap = {};
+  states.forEach((s,i) => { probMap[s] = (probs[i]*100).toFixed(1)+'%'; });
+
+  const asym = (Math.random()-0.5) * 0.3;
+  const isIda = asym < -0.04, isPingala = asym > 0.04;
+  const swaraState = isIda ? 'Ida Nadi — right hemisphere dominant'
+    : isPingala ? 'Pingala Nadi — left hemisphere dominant'
+    : 'Sushumna — both nadis balanced';
+  const swaraNote = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
+
+  const tattva = [];
+  if (bp.alpha>0.35 && bp.theta<0.25) tattva.push('Pratyahara Window');
+  if (bp.theta>0.28 && bp.alpha>0.28) tattva.push('Potential Tattva Activation');
+  if (bp.theta>0.32 && bp.delta>0.12) tattva.push('Turiya Approach');
+  if (bp.gamma>0.12) tattva.push('Gamma Spike');
+
+  epoch++;
+  const depth = CHITTA_DEPTHS[state];
+  return {
+    epoch, latency_ms: 20 + Math.random()*10,
+    data_quality: '✓ local FFT',
+    chitta_bhumi: { state, depth, confidence: probMap[state], probabilities: probMap },
+    swara: { state: swaraState, confidence: Math.abs(asym)>0.12 ? 'High' : 'Moderate', note: swaraNote },
+    band_powers: { relative: bp },
+    eeg_spectrum: bp,
+    alpha_asymmetry: asym,
+    tattva_flags: tattva,
+    contemplative_depth: depth,
+  };
+}
+
+// ── Demo mode ─────────────────────────────────────────────────────────────────
+// All 5 Chitta Bhumis (v2 adds Mudha). Cycle through them in demo.
+const DEMO_STATES = ['Kshipta','Vikshipta','Ekagra','Niruddha'];
+const DEMO_SWARA = [
+  'Ida (Parasympathetic / Lunar)',
+  'Pingala (Sympathetic / Solar)',
+  'Sushumna (Balanced / Central)',
+];
+// Band powers aligned with paper's exact EEG signatures (see data_generator.py)
+// high_beta (18-30 Hz) is the PRIMARY Rajas marker — shown separately from low_beta.
+const DEMO_BANDS = {
+  Mudha:    { delta:0.44, theta:0.17, alpha:0.07, low_beta:0.15, high_beta:0.10, gamma:0.04, beta:0.25 },
+  Kshipta:  { delta:0.09, theta:0.12, alpha:0.12, low_beta:0.22, high_beta:0.33, gamma:0.10, beta:0.55 },
+  Vikshipta:{ delta:0.14, theta:0.17, alpha:0.26, low_beta:0.21, high_beta:0.14, gamma:0.08, beta:0.35 },
+  Ekagra:   { delta:0.08, theta:0.29, alpha:0.37, low_beta:0.12, high_beta:0.07, gamma:0.07, beta:0.19 },
+  Niruddha: { delta:0.05, theta:0.18, alpha:0.30, low_beta:0.10, high_beta:0.05, gamma:0.32, beta:0.15 },
+};
+// Approximate gunas from paper's specifications for each state (for demo accuracy)
+const DEMO_GUNAS = {
+  Mudha:    { sattva:0.20, rajas:0.15, tamas:0.65, label:'Tamasic',  note:'Tamas predominates — heaviness and dullness. Stimulating pranayama recommended.' },
+  Kshipta:  { sattva:0.12, rajas:0.73, tamas:0.15, label:'Rajasic',  note:'Rajas predominates — high-beta desynchronization, prefrontal hyperarousal.' },
+  Vikshipta:{ sattva:0.52, rajas:0.32, tamas:0.16, label:'Balanced', note:'The three Gunas are in relative equilibrium — a balanced, transitional state.' },
+  Ekagra:   { sattva:0.78, rajas:0.12, tamas:0.10, label:'Sattvic',  note:'Sattva predominates — alpha synchrony and Fm-θ. Optimal for contemplative practice.' },
+  Niruddha: { sattva:0.88, rajas:0.07, tamas:0.05, label:'Sattvic',  note:'Deep Sattva — global gamma coherence. Gunatita: beyond the three Gunas.' },
+};
+
+// Deep-state features per bhūmi for demo mode — values mirror the backend golden
+// fixtures so the demo behaves like the real model (see generate_golden.py).
+const DEMO_TEXTURE = {
+  Mudha:    { vritti:0.24, complexity:{ lziv:0.14, higuchi_fd:1.05, sample_entropy:0.21, perm_entropy:0.61 }, aperiodic:{ exponent:3.42, offset:3.3 } },
+  Kshipta:  { vritti:0.69, complexity:{ lziv:0.43, higuchi_fd:1.88, sample_entropy:0.52, perm_entropy:0.73 }, aperiodic:{ exponent:1.16, offset:0.95 } },
+  Vikshipta:{ vritti:0.26, complexity:{ lziv:0.38, higuchi_fd:1.30, sample_entropy:0.45, perm_entropy:0.66 }, aperiodic:{ exponent:2.30, offset:2.1 } },
+  Ekagra:   { vritti:0.07, complexity:{ lziv:0.35, higuchi_fd:1.10, sample_entropy:0.49, perm_entropy:0.57 }, aperiodic:{ exponent:3.22, offset:3.27 } },
+  Niruddha: { vritti:0.00, complexity:{ lziv:0.50, higuchi_fd:1.72, sample_entropy:0.94, perm_entropy:0.85 }, aperiodic:{ exponent:1.36, offset:1.16 } },
+};
+
+// Signed-corroboration fixtures per bhūmi for demo mode — hand-authored to match
+// what the backend `corroborate` produces on the DEMO_TEXTURE values above, so
+// clicking ▶ Demo shows a representative "WHAT THE SIGNALS SAY" card with no
+// backend or headband. (Live/Bluetooth+backend paths get the real thing.)
+const DEMO_CORROB = {
+  Mudha: { concord:'corroborated', indeterminate:false, caveat:'', axes:[
+    { axis:'neural_complexity', reading:'low richness (0.23)', agrees:true, note:'low complexity is consistent with tāmasic dullness' },
+    { axis:'cortical_quietude', reading:'steep 1/f slope (exponent 3.42)', agrees:true, note:'steep 1/f fits low-arousal heaviness' },
+    { axis:'mental_chatter', reading:'moderate vṛtti (0.24)', agrees:null, note:'' },
+  ]},
+  Kshipta: { concord:'corroborated', indeterminate:false, caveat:'', axes:[
+    { axis:'neural_complexity', reading:'moderate richness (0.58)', agrees:null, note:'' },
+    { axis:'cortical_quietude', reading:'moderate 1/f slope (exponent 1.16)', agrees:null, note:'' },
+    { axis:'mental_chatter', reading:'high vṛtti (0.69)', agrees:true, note:'elevated high-β chatter fits Kṣipta' },
+  ]},
+  Vikshipta: { concord:'corroborated', indeterminate:false, caveat:'', axes:[
+    { axis:'neural_complexity', reading:'moderate richness (0.39)', agrees:true, note:'mid-range complexity fits an oscillating mind' },
+    { axis:'cortical_quietude', reading:'steep 1/f slope (exponent 2.30)', agrees:null, note:'' },
+    { axis:'mental_chatter', reading:'moderate vṛtti (0.26)', agrees:true, note:'some restlessness fits an oscillating mind' },
+  ]},
+  Ekagra: { concord:'corroborated', indeterminate:false, caveat:'', axes:[
+    { axis:'neural_complexity', reading:'high richness (0.63)', agrees:true, note:'retained complexity — genuine stillness, not drowsiness' },
+    { axis:'cortical_quietude', reading:'steep 1/f slope (exponent 3.22)', agrees:true, note:'steep 1/f — a quiet, inhibition-weighted cortex' },
+    { axis:'mental_chatter', reading:'low vṛtti (0.07)', agrees:true, note:'stilled fluctuations — citta-vṛtti-nirodha' },
+    { axis:'absorption_signature', reading:'present', agrees:true, note:'Fm-θ + α synchrony — the focused-attention absorption signature' },
+    { axis:'effortlessness', reading:'effortless', agrees:true, note:'effortless — the flow-like signature of dhyāna, not strained holding' },
+  ]},
+  Niruddha: { concord:'corroborated', indeterminate:false, caveat:'', axes:[
+    { axis:'neural_complexity', reading:'high richness (0.68)', agrees:true, note:'retained complexity — genuine stillness, not drowsiness' },
+    { axis:'cortical_quietude', reading:'moderate 1/f slope (exponent 1.36)', agrees:null, note:'' },
+    { axis:'mental_chatter', reading:'low vṛtti (0.00)', agrees:true, note:'stilled fluctuations — citta-vṛtti-nirodha' },
+    { axis:'effortlessness', reading:'effortless', agrees:true, note:'effortless — the flow-like signature of dhyāna, not strained holding' },
+  ]},
+};
+
+$('btn-demo').addEventListener('click', () => {
+  if (mode === 'demo') {
+    clearInterval(demoTimer); demoTimer = null;
+    mode = 'idle'; setStatus('', 'disconnected');
+    $('btn-demo').textContent = '▶ Demo';
+    return;
+  }
+  if (mode === 'bluetooth') disconnectBluetooth();
+  mode = 'demo';
+  resetSmoothing();
+  setStatus('demo', 'demo mode');
+  $('btn-demo').textContent = '⏹ Stop Demo';
+
+  const ALL_DEMO_STATES = ['Mudha','Kshipta','Vikshipta','Ekagra','Niruddha'];
+  const runDemo = () => {
+    demoEpoch++;
+    const state = ALL_DEMO_STATES[demoStateIdx % ALL_DEMO_STATES.length];
+    const swara = DEMO_SWARA[demoSwaraIdx % DEMO_SWARA.length];
+    const bp = { ...DEMO_BANDS[state] };
+
+    // Add realistic jitter to band powers
+    Object.keys(bp).forEach(k => { bp[k] = Math.max(0.01, bp[k] + (Math.random()-0.5)*0.03); });
+
+    const faa = swara.includes('Ida') ? -(0.15+Math.random()*0.25)
+      : swara.includes('Pingala') ? (0.15+Math.random()*0.25)
+      : (Math.random()-0.5)*0.10;
+    const isIda = faa < -0.15, isPingala = faa > 0.15;
+
+    // Build probabilities using paper's scoring logic (simplified)
+    const rawScores = {
+      Mudha:    Math.max(0, bp.delta - 0.30) * 3.0 + Math.max(0, 0.10 - bp.alpha) * 2.0,
+      Kshipta:  Math.max(0, bp.high_beta - 0.15) * 4.0 + Math.max(0, 0.15 - bp.alpha) * 2.0,
+      Vikshipta:Math.max(0, bp.alpha - 0.10) * 2.0 + 0.8,
+      Ekagra:   Math.max(0, bp.theta - 0.20) * 3.0 + Math.max(0, bp.alpha - 0.25) * 3.0,
+      Niruddha: Math.max(0, bp.gamma - 0.15) * 4.0,
+    };
+    const scoreTotal = Object.values(rawScores).reduce((a,b) => a+b, 1e-6);
+    const probs = {};
+    ALL_DEMO_STATES.forEach(s => { probs[s] = rawScores[s] / scoreTotal; });
+    // Bias winner toward current state
+    probs[state] = Math.max(probs[state], 0.45);
+    const biasTotal = Object.values(probs).reduce((a,b) => a+b, 0);
+    ALL_DEMO_STATES.forEach(s => { probs[s] /= biasTotal; });
+
+    const tattva = [];
+    if (bp.alpha > 0.35 && bp.high_beta < 0.10) tattva.push('Pratyahara Window');
+    if (bp.theta  > 0.28) tattva.push('Fm-θ Activation (Frontal Midline Theta)');
+    if (bp.gamma  > 0.15) tattva.push('Gamma Surge — Ajna/Sahasrara activation');
+    if (bp.delta  > 0.40 && bp.alpha < 0.10) tattva.push('Tamasic State — Kapalabhati recommended');
+    if (bp.high_beta > 0.30) tattva.push('High-Beta Agitation — Nadi Shodhana recommended');
+
+    epoch++;
+    const depth = CHITTA_DEPTHS[state];
+    const gunas = { ...DEMO_GUNAS[state] };
+    const swaraKey = isIda ? 'ida' : isPingala ? 'pingala' : 'sushumna';
+    const tex = DEMO_TEXTURE[state] || DEMO_TEXTURE.Vikshipta;
+    const vritti = clamp01(tex.vritti + (Math.random() - 0.5) * 0.05);
+    const r = {
+      epoch, latency_ms: 18 + Math.random() * 8,
+      data_quality: '✓ demo',
+      chitta_bhumi: { state, depth, confidence: probs[state].toFixed(3), probabilities: probs, corroboration: DEMO_CORROB[state] },
+      swara: {
+        state:      swara,
+        confidence: 'Moderate',
+        note:       SWARA_NOTES[swaraKey],
+      },
+      band_powers:  { relative: bp },
+      eeg_spectrum: bp,
+      alpha_asymmetry: faa,
+      tattva_flags: tattva,
+      contemplative_depth: depth,
+      gunas,
+      // Deep-state features (v3) — so the INNER TEXTURE gauges animate in demo.
+      vritti_index:  vritti,
+      nirodha_state: nirodhaLabel(vritti),
+      complexity:    tex.complexity,
+      aperiodic:     tex.aperiodic,
+      blood_oxygen: +(96 + Math.random() * 3).toFixed(1),
+      heart_rate:   Math.round(60 + Math.random() * 25),
+    };
+    applyReading(smoothReading(r));
+    storeEpochToSession(r);
+    if (demoEpoch % 3 === 0) demoStateIdx++;
+    if (demoEpoch % 7 === 0) demoSwaraIdx++;
+  };
+
+  runDemo();
+  demoTimer = setInterval(runDemo, DEMO_INTERVAL);
+});
+
+// ── Bluetooth mode ────────────────────────────────────────────────────────────
+$('btn-bluetooth').addEventListener('click', () => {
+  if (mode === 'bluetooth') {
+    disconnectBluetooth();
+  } else {
+    connectBluetooth();
+  }
+});
+
+// ── Headband drivers ──────────────────────────────────────────────────────────
+// Each driver isolates ONE headband's BLE quirks (service/characteristic UUIDs,
+// start handshake, packet→µV decoding, sample rate). Everything downstream only
+// ever sees normalised µV samples via ctx.pushSamples(channelIndex, µV[]), so the
+// entire analyse/render/store pipeline is device-agnostic. To support a new
+// headband, add a driver object to DRIVERS — nothing else needs to change.
+
+// Generic device-battery readout — drivers call this via ctx.reportBattery(pct).
+function updateBattery(pct) {
+  const tile = $('metric-battery');
+  const val = $('val-battery');
+  if (pct == null || Number.isNaN(pct)) {
+    if (tile) tile.style.display = 'none';
+    return;
+  }
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  if (val) val.textContent = p + '%';
+  if (tile) tile.style.display = '';
+}
+
+// Show the HR/SpO2 vitals cards only when the connected driver streams PPG.
+function updateVitalsVisibility(driver) {
+  const show = !!(driver && driver.hasPPG);
+  for (const id of ['spo2-card', 'hr-card']) {
+    const el = $(id);
+    if (el) el.style.display = show ? '' : 'none';
+  }
+}
+
+// Generic sink: all drivers funnel decoded µV samples through here.
+function pushSamples(ch, samples) {
+  if (!bleChannels[ch]) return;
+  bleChannels[ch].push(...samples);
+  bleSamTick += samples.length;
+
+  const buf = Math.min(bleChannels[0].length, COLLECT_N);
+  const bufEl = $('val-buffer');
+  if (bufEl) bufEl.textContent = buf + ' / ' + COLLECT_N;
+
+  if (bleChannels[0].length >= COLLECT_N) processBluetoothEEG();
+}
+
+const MuseDriver = {
+  id: 'muse',
+  name: 'Muse',
+  sampleRate: 256,
+  channelCount: 4,
+  hasPPG: true,  // Muse S streams PPG → heart-rate + SpO2 vitals
+
+  // Advertised by the scan filter and identifies the device after connect.
+  filters: [{ services: [MUSE_SERVICE_UUID] }],
+  optionalServices: [MUSE_SERVICE_UUID],
+  async isMatch(server) {
+    return server.getPrimaryService(MUSE_SERVICE_UUID).then(() => true).catch(() => false);
+  },
+  async start(server, ctx) {
+    const service = await server.getPrimaryService(MUSE_SERVICE_UUID);
+
+    const controlChar = await service.getCharacteristic(MUSE_CONTROL_UUID).catch(() => null);
+    if (controlChar) {
+      // CRITICAL: Muse protocol requires a 1-byte length prefix before every command.
+      // Without the prefix the headband silently ignores the command and never streams EEG.
+      const museCmd = (s) => {
+        const payload = new TextEncoder().encode(s + '\n');
+        const buf = new Uint8Array(payload.length + 1);
+        buf[0] = payload.length; // length prefix byte — this is mandatory
+        buf.set(payload, 1);
+        return buf;
+      };
+      await controlChar.writeValue(museCmd('h'));    // halt any prior streaming
+      await new Promise(r => setTimeout(r, 300));
+      await controlChar.writeValue(museCmd('p21'));  // preset 21 = EEG mode
+      await new Promise(r => setTimeout(r, 300));
+      await controlChar.writeValue(museCmd('d'));    // start streaming
+      await new Promise(r => setTimeout(r, 500));    // let stream initialise before subscribing
+    }
+
+    for (let c = 0; c < MUSE_EEG_UUIDS.length; c++) {
+      const char = await service.getCharacteristic(MUSE_EEG_UUIDS[c]).catch(() => null);
+      if (!char) continue;
+      await char.startNotifications();
+      const ch = c;
+      char.addEventListener('characteristicvaluechanged', ev => {
+        const data = ev.target.value;
+        const samples = [];
+        // Safe loop — always leaves 2 bytes to read (i and i+1).
+        for (let i = 2; i + 1 < data.byteLength; i += 2) {
+          // Raw int16 → microvolts (Muse scale: 0.48828125 µV/LSB).
+          samples.push(data.getInt16(i, false) * 0.48828125e-6);
+        }
+        ctx.pushSamples(ch, samples);
+      });
+    }
+
+    // Muse S PPG subscription for heart rate + SpO2 (absent on plain Muse — best effort).
+    for (const [key, uuid] of Object.entries(MUSE_PPG_UUIDS)) {
+      const ppgChar = await service.getCharacteristic(uuid).catch(() => null);
+      if (!ppgChar) continue;
+      await ppgChar.startNotifications();
+      ppgChar.addEventListener('characteristicvaluechanged', ev => onMusePPG(ev, key));
+    }
+  },
+};
+
+const BrainBitDriver = {
+  id: 'brainbit',
+  name: 'BrainBit',
+  sampleRate: 250,
+  channelCount: 4,
+  hasPPG: false, // EEG only — no optical pulse sensor, so no HR/SpO2
+
+  // BrainBit does not reliably advertise its service UUID, so scan by name.
+  filters: [{ namePrefix: 'BrainBit' }],
+  optionalServices: [BRAINBIT_SERVICE_UUID],
+  async isMatch(server) {
+    return server.getPrimaryService(BRAINBIT_SERVICE_UUID).then(() => true).catch(() => false);
+  },
+  async start(server, ctx) {
+    const service = await server.getPrimaryService(BRAINBIT_SERVICE_UUID);
+
+    // Subscribe to the signal (EEG) characteristic BEFORE starting the stream.
+    const signalChar = await service.getCharacteristic(BRAINBIT_SIGNAL_UUID);
+    await signalChar.startNotifications();
+    signalChar.addEventListener('characteristicvaluechanged', ev => {
+      const b = new Uint8Array(ev.target.value.buffer);
+      if (b.length < 20) return; // each signal packet is 20 bytes → 4 ch × 2 samples
+      const m = BRAINBIT_SIGNAL_MULT;
+      // Sample 0 of each channel: a 20-bit value, bit-packed and left-aligned into
+      // a signed 32-bit int so JS's signed << sign-extends it, then /2048.
+      const v0 = (((b[1] & 0x0F) << 28) | (b[2] << 20) | (b[3] << 12) | (b[4] << 4)) / 2048;
+      const v1 = (((b[4] & 0x7F) << 25) | (b[5] << 17) | (b[6] << 9)  | (b[7] << 1)) / 2048;
+      const v2 = (((b[6] & 0x03) << 30) | (b[7] << 22) | (b[8] << 14) | (b[9] << 6)) / 2048;
+      const v3 = (((b[9] & 0x1F) << 27) | (b[10] << 19) | (b[11] << 11)) / 2048;
+      // Sample 1 of each channel: a 16-bit signed delta added to sample 0.
+      const d0 = ((b[12] << 24) | (b[13] << 16)) / 65536 + v0;
+      const d1 = ((b[14] << 24) | (b[15] << 16)) / 65536 + v1;
+      const d2 = ((b[16] << 24) | (b[17] << 16)) / 65536 + v2;
+      const d3 = ((b[18] << 24) | (b[19] << 16)) / 65536 + v3;
+      // Push ch0 LAST so the COLLECT_N trigger never fires with ch1–3 still short.
+      ctx.pushSamples(1, [v1 * m, d1 * m]);
+      ctx.pushSamples(2, [v2 * m, d2 * m]);
+      ctx.pushSamples(3, [v3 * m, d3 * m]);
+      ctx.pushSamples(0, [v0 * m, d0 * m]);
+    });
+
+    // Status characteristic: battery % lives in byte[2] (value >> 1 = percent).
+    const statusChar = await service.getCharacteristic(BRAINBIT_STATUS_UUID).catch(() => null);
+    if (statusChar) {
+      const readBattery = dv => {
+        if (dv && dv.byteLength > 2 && ctx.reportBattery) ctx.reportBattery(dv.getUint8(2) >> 1);
+      };
+      await statusChar.startNotifications().catch(() => {});
+      statusChar.addEventListener('characteristicvaluechanged', ev => readBattery(ev.target.value));
+      readBattery(await statusChar.readValue().catch(() => null)); // seed immediately
+    }
+
+    // Command characteristic: halt anything prior, then start signal streaming.
+    const commandChar = await service.getCharacteristic(BRAINBIT_COMMAND_UUID);
+    await commandChar.writeValue(BRAINBIT_CMD_STOP);
+    await new Promise(r => setTimeout(r, 200));
+    await commandChar.writeValue(BRAINBIT_CMD_SIGNAL);
+  },
+};
+
+// Registry of supported headbands. Add a driver here to support a new device —
+// the generic connect/consume pipeline needs nothing else.
+const DRIVERS = [MuseDriver, BrainBitDriver];
+
+async function connectBluetooth() {
+  if (!navigator.bluetooth) {
+    alert('Web Bluetooth is not available. Please use Chrome or Edge on desktop.');
+    return;
+  }
+  try {
+    // Offer every supported headband in one scan.
+    const filters = DRIVERS.flatMap(d => d.filters);
+    const optionalServices = [...new Set(DRIVERS.flatMap(d => d.optionalServices))];
+    const device = await navigator.bluetooth.requestDevice({ filters, optionalServices });
+    btDevice = device;
+    device.addEventListener('gattserverdisconnected', onBtDisconnected);
+
+    // gatt.connect() is flaky on Windows ("Connection attempt failed") and often
+    // succeeds on a retry — attempt up to 4 times with a short backoff.
+    let server = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        setStatus('bluetooth', 'connecting… (' + attempt + '/4)');
+        server = await device.gatt.connect();
+        break;
+      } catch (e) {
+        if (attempt === 4) throw e;
+        await new Promise(r => setTimeout(r, 600));
+      }
+    }
+
+    // Identify which driver owns the connected device.
+    let driver = null;
+    for (const d of DRIVERS) {
+      if (await d.isMatch(server)) { driver = d; break; }
+    }
+    if (!driver) throw new Error('No compatible EEG driver for this device');
+
+    activeDriver = driver;
+    activeSampleRate = driver.sampleRate;
+    updateVitalsVisibility(driver); // HR/SpO2 only for PPG-capable devices
+    // Size the channel buffers for this device.
+    bleChannels.length = 0;
+    for (let i = 0; i < driver.channelCount; i++) bleChannels.push([]);
+    ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
+    latestHeartRate = null; latestSpO2 = null;
+
+    await driver.start(server, { pushSamples, reportBattery: updateBattery });
+
+    btDisconnect = () => { if (device.gatt.connected) device.gatt.disconnect(); };
+
+    // Stop backend URL polling — BT mode handles data directly.
+    if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
+    mode = 'bluetooth';
+    resetSmoothing();
+    setStatus('bluetooth', driver.name + ' connected');
+    $('btn-bluetooth').classList.add('bt-active');
+    $('bt-device-name').textContent = device.name || (driver.name + ' device');
+    $('bt-device-row').style.display = '';
+    $('val-buffer').textContent = '0 / ' + COLLECT_N;
+  } catch (err) {
+    if (!err.message?.includes('cancelled')) {
+      console.warn('BT connect failed:', err.message);
+      setStatus('error', 'BT failed: ' + err.message);
+    }
+  }
+}
+
+async function processBluetoothEEG() {
+  const snapshot = bleChannels.map(ch => {
+    const s = ch.slice(-COLLECT_N);
+    ch.length = 0;
+    return s;
+  });
+  const bufEl = $('val-buffer');
+  if (bufEl) bufEl.textContent = '0 / ' + COLLECT_N;
+  blePhase++;
+  const t0 = performance.now();
+
+  if (backendUrl) {
+    try {
+      const res = await fetch(backendUrl.replace(/\/$/, '') + '/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            eeg_data: snapshot,
+            sample_rate: activeSampleRate,
+            ...(latestSpO2 !== null     && { blood_oxygen: +latestSpO2.toFixed(1) }),
+            ...(latestHeartRate !== null && { heart_rate:  +latestHeartRate.toFixed(1) }),
+          }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || 'HTTP ' + res.status);
+      }
+      const data = await res.json();
+      const latency = (performance.now() - t0).toFixed(1);
+      epoch++;
+      const r = {
+        epoch, latency_ms: parseFloat(latency),
+        data_quality: '✓ BLE → Render',
+        timestamp: new Date().toISOString().slice(11,22) + ' UTC',
+        chitta_bhumi: {
+          state: data.chitta_bhumi?.state || '—',
+          depth: data.chitta_bhumi?.depth || data.depth || '—',
+          confidence: data.chitta_bhumi?.confidence || '—',
+          probabilities: data.chitta_bhumi?.probabilities || {},
+        },
+        swara: {
+          state: data.swara?.state || '—',
+          confidence: data.swara?.confidence || '—',
+          // Use backend note, fall back to our SWARA_NOTES lookup
+          note: data.swara?.note || SWARA_NOTES[(data.swara?.state||'').toLowerCase().split(' ')[0]] || '',
+        },
+        // Backend may return tattva_flags or tattva; check both
+        tattva_flags: data.tattva_flags || data.tattva || [],
+        contemplative_depth: data.chitta_bhumi?.depth || data.depth || '—',
+        // Use hemispheric asymmetry from backend if available
+        alpha_asymmetry: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? 0,
+        // Backend returns eeg_spectrum or band_relative
+        eeg_spectrum: data.eeg_spectrum || data.band_relative || null,
+        gunas: data.gunas || null,
+        // Deep-state features (v3) — rendered as plain-language gauges.
+        vritti_index: data.vritti_index ?? null,
+        nirodha_state: data.nirodha_state || null,
+        complexity: data.complexity || null,
+        aperiodic: data.aperiodic || null,
+        connectivity: data.connectivity || null,
+        blood_oxygen: data.blood_oxygen ?? null,
+        heart_rate: data.heart_rate ?? null,
+      };
+      applyReading(smoothReading(r));
+      storeEpochToSession(r);
+      return;
+    } catch (err) {
+      console.warn('Backend /analyze failed, falling back to local FFT:', err.message);
+    }
+  }
+
+  // Local FFT fallback
+  const signal = snapshot[0] || [];
+  if (signal.length < 64) return;
+  const sz = Math.pow(2, Math.floor(Math.log2(signal.length)));
+  const mags = fft(signal.slice(-sz));
+  const bp = bandPowers(mags, activeSampleRate, sz);
+  const r = classifyLocal(bp);
+  r.latency_ms = parseFloat((performance.now() - t0).toFixed(1));
+  applyReading(smoothReading(r));
+  storeEpochToSession(r);
+}
+
+function disconnectBluetooth() {
+  if (btDisconnect) { btDisconnect(); btDisconnect = null; }
+  btDevice = null;
+  activeDriver = null;
+  activeSampleRate = SAMPLE_RATE;
+  updateBattery(null); // hide the battery tile
+  updateVitalsVisibility(null); // hide HR/SpO2 cards
+  const btRow = $('bt-device-row');
+  if (btRow) btRow.style.display = 'none';
+  bleChannels.forEach(ch => { ch.length = 0; });
+  ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
+  latestHeartRate = null; latestSpO2 = null;
+  mode = 'idle';
+  setStatus('', 'disconnected');
+  $('btn-bluetooth').classList.remove('bt-active');
+  const bufEl = $('val-buffer');
+  if (bufEl) bufEl.textContent = '0 / ' + COLLECT_N;
+}
+
+function onBtDisconnected() {
+  if (mode === 'bluetooth') disconnectBluetooth();
+}
+
+// ── Muse S PPG processing (heart rate + SpO2) ─────────────────────────────────
+function onMusePPG(ev, channel) {
+  const data = ev.target.value;
+  // Muse PPG: 2-byte header + 6 samples × 3 bytes uint24 big-endian
+  const buf = ppgBuf[channel];
+  for (let i = 2; i + 2 < data.byteLength; i += 3) {
+    buf.push((data.getUint8(i) << 16) | (data.getUint8(i + 1) << 8) | data.getUint8(i + 2));
+  }
+  if (buf.length > PPG_WINDOW_SAMPLES) buf.splice(0, buf.length - PPG_WINDOW_SAMPLES);
+
+  if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES) {
+    latestHeartRate = computeHeartRate(ppgBuf.ir);
+    if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) latestSpO2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
+    const hrEl = $('val-hr'), spo2El = $('val-spo2');
+    const hrSt = $('hr-status'), spo2St = $('spo2-status');
+    if (hrEl && latestHeartRate != null) { hrEl.textContent = latestHeartRate.toFixed(0); if (hrSt) hrSt.textContent = 'live reading'; }
+    if (spo2El && latestSpO2 != null)   { spo2El.textContent = latestSpO2.toFixed(1);   if (spo2St) spo2St.textContent = 'live reading'; }
+  }
+}
+
+/** BPM from PPG IR via threshold peak detection */
+function computeHeartRate(signal) {
+  if (signal.length < 64) return null;
+  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  const ac = signal.map(v => v - mean);
+  const std = Math.sqrt(ac.reduce((s, v) => s + v * v, 0) / ac.length);
+  const thr = std * 0.5;
+  // 0.28 s refractory → supports up to ~214 BPM (covers athletic/stress range)
+  const minDist = Math.round(PPG_SAMPLE_RATE * 0.28);
+  const peaks = []; let lastPeak = -minDist;
+  for (let i = 1; i < ac.length - 1; i++) {
+    if (ac[i] > thr && ac[i] > ac[i - 1] && ac[i] > ac[i + 1] && (i - lastPeak) >= minDist) {
+      peaks.push(i); lastPeak = i;
+    }
+  }
+  if (peaks.length < 2) return null;
+  const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
+  const meanRR = rrs.reduce((a, b) => a + b, 0) / rrs.length;
+  const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
+  return (hr >= 30 && hr <= 200) ? hr : null;
+}
+
+/** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
+function computeSpO2(ir, red) {
+  if (ir.length < 64 || red.length < 64) return null;
+  const len = Math.min(ir.length, red.length);
+  const irS = ir.slice(-len), redS = red.slice(-len);
+  const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+  const acRms = a => { const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); };
+  const dcIr = mean(irS), dcRed = mean(redS);
+  if (dcIr < 1 || dcRed < 1) return null;
+  const acIr = acRms(irS), acRed = acRms(redS);
+  if (acIr < 1 || acRed < 1) return null;
+  const R = (acRed / dcRed) / (acIr / dcIr);
+  return Math.min(100, Math.max(85, 110 - 25 * R));
+}
+
+// ── Backend URL mode ──────────────────────────────────────────────────────────
+// Lightweight status ping that does NOT change mode (safe to call on login)
+async function pingBackendStatus(url) {
+  try {
+    const res = await fetch(url.replace(/\/$/, '') + '/status', { signal: AbortSignal.timeout(8000) });
+    if (res.ok) {
+      const data = await res.json();
+      const boardEl = $('val-board');
+      const modeEl = $('val-mode');
+      if (boardEl) boardEl.textContent = 'Render backend';
+      if (modeEl) modeEl.textContent = data.model_ready ? 'ready' : 'loading model…';
+    }
+  } catch {
+    const boardEl = $('val-board');
+    if (boardEl) boardEl.textContent = 'backend waking…';
+  }
+}
+
+async function connectBackendUrl(url) {
+  if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
+  mode = 'backend';
+  setStatus('waking', 'waking up…');
+  const boardEl = $('val-board');
+  const modeEl = $('val-mode');
+  if (boardEl) boardEl.textContent = 'Render backend';
+  if (modeEl) modeEl.textContent = 'BLE → Render';
+
+  let attempts = 0;
+  const MAX = 40;
+  let modelConfirmedReady = false;
+
+  const poll = async () => {
+    attempts++;
+    try {
+      const res = await fetch(url.replace(/\/$/, '') + '/status', { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.model_ready) {
+          modelConfirmedReady = true;
+          clearInterval(backendPollTimer); backendPollTimer = null;
+          setStatus('connected', 'backend ready');
+        } else {
+          setStatus('waking', 'model loading…');
+        }
+      } else {
+        setStatus('waking', 'waking up…');
+      }
+    } catch {
+      if (attempts >= MAX) {
+        modelConfirmedReady = true; // stop retrying
+        clearInterval(backendPollTimer); backendPollTimer = null;
+        setStatus('error', 'backend offline');
+      }
+    }
+  };
+
+  await poll();
+  // Do not start interval if: BT connected during first poll, or model already confirmed ready
+  if (mode !== 'backend' || modelConfirmedReady) return;
+  backendPollTimer = setInterval(poll, 1500);
+}
+
+// ── Stop everything ───────────────────────────────────────────────────────────
+function stopAll() {
+  clearInterval(demoTimer); demoTimer = null;
+  clearInterval(pollTimer); pollTimer = null;
+  clearInterval(backendPollTimer); backendPollTimer = null;
+  if (sseSource) { sseSource.close(); sseSource = null; }
+  if (mode === 'bluetooth') disconnectBluetooth();
+  mode = 'idle';
+  setStatus('', 'disconnected');
+  const demoBtn = $('btn-demo');
+  if (demoBtn) demoBtn.textContent = '▶ Demo';
+}
+
+// ── Canvas / waveform ─────────────────────────────────────────────────────────
+function resizeCanvas() {
+  const canvas = $('eeg-canvas');
+  if (!canvas) return;
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+// ── Band colour table for wave visualization (yogic chakra associations) ─────
+function drawWave() {
+  const canvas = $('eeg-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const cy = H / 2; // vertical centre of canvas
+
+  if (mode === 'bluetooth' && bleSamTick > 0) {
+    // ── Live BLE: draw raw EEG samples ──────────────────────────────────
+    const ch0 = bleChannels[0];
+    const len = Math.min(ch0.length, WAVE_LEN);
+    if (len > 1) {
+      ctx.beginPath();
+      ctx.strokeStyle = 'var(--accent, #56A67A)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < len; i++) {
+        const x = (i / (len - 1)) * W;
+        const y = cy - ch0[ch0.length - len + i] * H * 400;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+  } else {
+    // ── Demo / idle: one smooth slow wave ───────────────────────────────
+    // Advance phase slowly so the wave scrolls at a calm, readable pace.
+    wavePhase += 0.015;
+    const bp = lastBandPowers;
+
+    // Two gentle sinusoids — a slow swell (alpha-shaped) and a subtle
+    // faster ripple (beta-shaped) — blended into one single line.
+    const swell  = (bp.alpha || 0.28) * (H * 0.30); // large slow component
+    const ripple = ((bp.low_beta || 0.18) + (bp.high_beta || 0.13)) * (H * 0.06);
+
+    ctx.beginPath();
+    ctx.strokeStyle = 'var(--accent, #56A67A)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i <= WAVE_LEN; i++) {
+      const x = (i / WAVE_LEN) * W;
+      const t = (i / WAVE_LEN) * Math.PI * 4 + wavePhase; // ~2 full cycles across canvas
+      const y = cy
+        + Math.sin(t)          * swell          // slow primary swell
+        + Math.sin(t * 2.6)    * ripple;        // subtle faster ripple on top
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  requestAnimationFrame(drawWave);
+}
+
+// ── Status indicator ──────────────────────────────────────────────────────────
+function setStatus(cls, text) {
+  const dot = $('status-dot');
+  const lbl = $('status-text');
+  if (dot) dot.className = 'status-dot' + (cls ? ' ' + cls : '');
+  if (lbl) lbl.textContent = text;
+  const cmdDot = $('cmd-conn-dot'); // command-bar mirror
+  if (cmdDot) cmdDot.className = 'status-dot' + (cls ? ' ' + cls : '');
+}
+
+// ── Apply reading to UI ───────────────────────────────────────────────────────
+// ── Inner Texture: turn the backend's deep-state features into plain-language
+// gauges. Vṛtti is backend-computed; Richness (complexity) and Stillness
+// (aperiodic 1/f) are rolled up here. These are RELATIVE gauges — absolute
+// low/med/high needs per-user calibration (backend Phase 4), so they read as a
+// live trend within the session, not a clinical verdict. ──
+function renderInnerTexture(r) {
+  // Vṛtti — mental activity, 0 (still / nirodha) → 100 (scattered).
+  setTextureBar('vritti', r.vritti_index != null ? r.vritti_index * 100 : null);
+  const nir = $('nirodha-state');
+  if (nir) nir.textContent = r.nirodha_state || '—';
+
+  // Mind Richness — roll the four complexity metrics into one gauge.
+  const cx = r.complexity;
+  let richness = null;
+  if (cx) {
+    const parts = [
+      clamp01(cx.lziv),                    // normalised LZ, ~0..1
+      clamp01(cx.perm_entropy),            // normalised, 0..1
+      clamp01(cx.sample_entropy / 1.5),    // ~0..1.5 → 0..1
+      clamp01((cx.higuchi_fd - 1) / 1),    // ~1..2 → 0..1
+    ];
+    richness = parts.reduce((a, b) => a + b, 0) / parts.length;
+  }
+  setTextureBar('richness', richness != null ? richness * 100 : null);
+
+  // Background Stillness — steeper aperiodic 1/f exponent = more settled.
+  const ap = r.aperiodic;
+  const stillness = (ap && ap.exponent != null)
+    ? clamp01((ap.exponent - 1.0) / (3.5 - 1.0)) : null;
+  setTextureBar('stillness', stillness != null ? stillness * 100 : null);
+}
+
+// ── Signed corroboration ────────────────────────────────────────────────────
+// The bhūmi is the primary (śāstric) reading; these Western neuromarkers sit
+// UNDER it as plain-language witnesses that either back it up or gently question
+// it. No backend jargon reaches the screen — axis keys map to lay names, the
+// `agrees` flag becomes a ✓ / ~ / – marker, and a divergence shows an honest
+// caveat rather than being hidden. Mirrors the backend `corroborate` output.
+const CORROB_LAY_AXIS = {
+  neural_complexity:    'Mind richness',
+  cortical_quietude:    'Background stillness',
+  mental_chatter:       'Mental chatter',
+  absorption_signature: 'Focus',
+  effortlessness:       'Effortlessness',
+};
+const CORROB_CONCORD = {
+  corroborated: 'Signals agree',
+  mixed:        'Mixed signals',
+  tension:      'Signals in tension',
+  inconclusive: 'Inconclusive',
+};
+
+function corrTone(agrees)  { return agrees === true ? 'support' : agrees === false ? 'tension' : 'neutral'; }
+function corrGlyph(agrees) { return agrees === true ? '✓'       : agrees === false ? '~'       : '–'; }
+
+function renderCorroboration(r) {
+  const host = $('corrob');
+  if (!host) return;
+  const co = r.chitta_bhumi && r.chitta_bhumi.corroboration;
+  if (!co || !co.axes || !co.axes.length) { host.style.display = 'none'; host.innerHTML = ''; return; }
+  host.style.display = '';
+
+  const concordTone = co.concord === 'corroborated' ? 'support'
+    : co.concord === 'tension' ? 'tension' : 'neutral';
+
+  const rows = co.axes.map(a => {
+    const tone = corrTone(a.agrees);
+    const chip = (a.reading || '').split(/[\s(]/)[0];   // qualitative word only, no raw value
+    return `<div class="corrob-row">
+        <span class="corrob-mark ${tone}">${corrGlyph(a.agrees)}</span>
+        <div class="corrob-text">
+          <span class="corrob-name">${escHtml(CORROB_LAY_AXIS[a.axis] || a.axis)}</span>
+          <span class="corrob-note">${escHtml(a.note || '')}</span>
+        </div>
+        <span class="corrob-reading">${escHtml(chip)}</span>
+      </div>`;
+  }).join('');
+
+  const tentative = co.indeterminate ? '<span class="corrob-tentative">held gently</span>' : '';
+  const caveat = co.caveat
+    ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(co.caveat)}</span></div>`
+    : '';
+
+  host.innerHTML = `
+    <div class="corrob-head">
+      <span class="card-label">WHAT THE SIGNALS SAY</span>
+      <span class="corrob-concord ${concordTone}">${escHtml(CORROB_CONCORD[co.concord] || co.concord)}</span>
+    </div>
+    ${tentative}
+    <div class="corrob-rows">${rows}</div>
+    ${caveat}`;
+}
+
+function setTextureBar(key, pct) {
+  const bar = $('bar-' + key);
+  const val = $('val-' + key);
+  if (bar) bar.style.width = (pct != null ? Math.round(pct) : 0) + '%';
+  if (val) val.textContent = pct != null ? Math.round(pct) + '%' : '—';
+}
+
+function clamp01(x) { return (x == null || isNaN(x)) ? 0 : Math.max(0, Math.min(1, x)); }
+
+// Plain-language band over the vṛtti index — mirrors the backend thresholds.
+function nirodhaLabel(v) {
+  return v < 0.20 ? 'Nirodha (still)'
+    : v < 0.45 ? 'Settling'
+    : v < 0.70 ? 'Active'
+    : 'Vikshepa (scattered)';
+}
+
+// ── Temporal smoothing ─────────────────────────────────────────────────────
+// A single 4-second epoch is a noisy snapshot; meditative states unfold over
+// tens of seconds, and Vikshipta is *defined* as oscillating — so raw per-epoch
+// labels flicker meaninglessly. We therefore smooth the live DISPLAY only:
+// continuous quantities (gunas, vṛtti, bands, complexity, aperiodic, the 5
+// probabilities) are EMA-filtered; the discrete labels (bhūmi, swara) use
+// hysteresis — they switch only when a new candidate persists. Raw epochs are
+// still persisted to the DB unchanged (storeEpochToSession gets the raw reading).
+const SMOOTH_ALPHA  = 0.2;   // EMA factor (~18 s time constant at 4 s epochs)
+const STATE_DWELL   = 2;     // epochs a new label must persist before switching
+const CHITTA_STATES = ['Mudha', 'Kshipta', 'Vikshipta', 'Ekagra', 'Niruddha'];
+
+let smooth = null;
+function resetSmoothing() { smooth = null; }
+
+function _ema(key, value) {
+  const prev = smooth.ema[key];
+  if (value == null || isNaN(value)) return prev == null ? null : prev;
+  smooth.ema[key] = (prev == null) ? value : prev + SMOOTH_ALPHA * (value - prev);
+  return smooth.ema[key];
+}
+
+function numify(x) {
+  if (x == null) return null;
+  const n = typeof x === 'number' ? x : parseFloat(x);
+  return isNaN(n) ? null : n;
+}
+
+function coarseGunaLabel(s, r, t) {
+  const max = Math.max(s, r, t), min = Math.min(s, r, t);
+  if (max - min < 0.12) return 'Balanced (all three)';
+  return max === s ? 'Sattvic' : max === r ? 'Rajasic' : 'Tamasic';
+}
+
+function smoothReading(r) {
+  if (!smooth) smooth = { ema: {}, epochs: 0, state: null, cand: null, candN: 0,
+                          swara: null, swaraFull: null, swCand: null, swN: 0 };
+  smooth.epochs++;
+
+  // ── Continuous scalars (EMA) ──
+  const vritti = _ema('vritti', r.vritti_index);
+  const asym   = _ema('asym', numify(r.alpha_asymmetry));
+
+  const spectrum = {};
+  ['delta', 'theta', 'alpha', 'low_beta', 'high_beta', 'beta', 'gamma'].forEach(b => {
+    const v = _ema('band_' + b, numify(r.eeg_spectrum?.[b]));
+    if (v != null) spectrum[b] = v;
+  });
+
+  const g = r.gunas || {};
+  const sattva = _ema('sattva', numify(g.sattva));
+  const rajas  = _ema('rajas',  numify(g.rajas));
+  const tamas  = _ema('tamas',  numify(g.tamas));
+
+  const lz  = _ema('lziv', r.complexity?.lziv);
+  const hfd = _ema('hfd',  r.complexity?.higuchi_fd);
+  const se  = _ema('se',   r.complexity?.sample_entropy);
+  const pe  = _ema('pe',   r.complexity?.perm_entropy);
+  const cx  = lz != null ? { lziv: lz, higuchi_fd: hfd, sample_entropy: se, perm_entropy: pe } : null;
+
+  const apx = _ema('apx', r.aperiodic?.exponent);
+  const apo = _ema('apo', r.aperiodic?.offset);
+  const ap  = apx != null ? { exponent: apx, offset: apo } : null;
+
+  // ── Smoothed, renormalised probabilities ──
+  const raw = r.chitta_bhumi?.probabilities || {};
+  const probs = {}; let tot = 0;
+  CHITTA_STATES.forEach(s => { const v = _ema('p_' + s, numify(raw[s])); probs[s] = v == null ? 0 : v; tot += probs[s]; });
+  if (tot > 0) CHITTA_STATES.forEach(s => probs[s] /= tot);
+
+  // ── Discrete bhūmi via hysteresis over the smoothed probabilities ──
+  const winner = CHITTA_STATES.reduce((a, b) => (probs[b] > probs[a] ? b : a), CHITTA_STATES[0]);
+  if (smooth.state == null) smooth.state = winner;
+  else if (winner !== smooth.state) {
+    smooth.candN = (winner === smooth.cand) ? smooth.candN + 1 : 1;
+    smooth.cand = winner;
+    if (smooth.candN >= STATE_DWELL) { smooth.state = winner; smooth.cand = null; smooth.candN = 0; }
+  } else { smooth.cand = null; smooth.candN = 0; }
+  const state = smooth.state;
+
+  // ── Swara zone via hysteresis ──
+  const zone = (r.swara?.state || '').split(' ')[0] || null;
+  if (zone) {
+    if (smooth.swara == null) { smooth.swara = zone; smooth.swaraFull = r.swara; }
+    else if (zone !== smooth.swara) {
+      smooth.swN = (zone === smooth.swCand) ? smooth.swN + 1 : 1;
+      smooth.swCand = zone;
+      if (smooth.swN >= STATE_DWELL) { smooth.swara = zone; smooth.swaraFull = r.swara; smooth.swCand = null; smooth.swN = 0; }
+    } else { smooth.swCand = null; smooth.swN = 0; smooth.swaraFull = r.swara; }
+  }
+
+  return {
+    ...r,
+    chitta_bhumi: {
+      state,
+      depth: CHITTA_DEPTHS[state] || r.chitta_bhumi?.depth || '—',
+      confidence: probs[state],
+      probabilities: probs,
+      // Carried through unsmoothed — it's the latest epoch's signed corroboration.
+      // Keyed to the backend's per-epoch state; may briefly lag the hysteresis label.
+      corroboration: r.chitta_bhumi?.corroboration,
+    },
+    contemplative_depth: CHITTA_DEPTHS[state] || r.contemplative_depth,
+    swara: smooth.swaraFull || r.swara,
+    alpha_asymmetry: asym != null ? asym : r.alpha_asymmetry,
+    eeg_spectrum: Object.keys(spectrum).length ? spectrum : r.eeg_spectrum,
+    gunas: sattva != null ? { sattva, rajas, tamas, label: coarseGunaLabel(sattva, rajas, tamas) } : r.gunas,
+    vritti_index: vritti != null ? vritti : r.vritti_index,
+    nirodha_state: vritti != null ? nirodhaLabel(vritti) : r.nirodha_state,
+    complexity: cx || r.complexity,
+    aperiodic: ap || r.aperiodic,
+  };
+}
+
+function applyReading(r) {
+  // ── Epoch / quality / latency ──
+  const epochEl = $('val-epoch');
+  const qualEl = $('val-quality');
+  const latEl = $('val-latency');
+  if (epochEl) epochEl.textContent = r.epoch ?? epoch;
+  if (qualEl) qualEl.textContent = r.data_quality || '—';
+  if (latEl) latEl.textContent = r.latency_ms != null ? r.latency_ms.toFixed(1) : '—';
+
+  // ── Chitta Bhumi ──
+  const ch = r.chitta_bhumi || {};
+  const state = ch.state || '—';
+  const chittaEl = $('chitta-state');
+  const chittaSubEl = $('chitta-sub');
+  if (chittaEl) chittaEl.textContent = state;
+  if (chittaSubEl) chittaSubEl.textContent = ch.depth || ch.confidence || '—';
+
+  const depth = ch.depth || CHITTA_DEPTHS[state] || 'Surface';
+  const depthPct = DEPTH_PCT[depth] ?? 12;
+  const depthFill = $('depth-fill');
+  const depthColor = state === 'Mudha'     ? '#4A3060'       // deep inertia — dark purple
+    : state === 'Kshipta'   ? 'var(--kshipta)'
+    : state === 'Vikshipta' ? 'var(--vikshipta)'
+    : state === 'Ekagra'    ? 'var(--ekagra)' : 'var(--niruddha)';
+  if (depthFill) {
+    depthFill.style.width = depthPct + '%';
+    depthFill.style.background = depthColor;
+  }
+
+  const confEl = $('val-confidence');
+  const depthEl = $('val-depth');
+  if (confEl) confEl.textContent = ch.confidence || '—';
+  if (depthEl) depthEl.textContent = depth;
+
+  const probs = ch.probabilities || {};
+  // All 5 Chitta Bhumis (v2 adds Mudha)
+  ['Mudha', 'Kshipta', 'Vikshipta', 'Ekagra', 'Niruddha'].forEach(s => {
+    const raw = probs[s] ?? '0%';
+    const pct = typeof raw === 'number' ? raw * 100 : parseFloat(raw);
+    const key = s.toLowerCase();
+    const el = $('prob-' + key);
+    const bar = $('bar-' + key);
+    if (el) el.textContent = isNaN(pct) ? raw : pct.toFixed(1) + '%';
+    if (bar) bar.style.width = (isNaN(pct) ? parseFloat(raw) : pct) + '%';
+  });
+
+  // ── Swara ──
+  const sw = r.swara || {};
+  const sst = (sw.state || '').toLowerCase();
+  const isIda = /ida/.test(sst);
+  const isPingala = /pingala/.test(sst);
+  const isSushumna = !isIda && !isPingala;
+
+  const swaraNote = $('swara-note');
+  const swaraConf = $('swara-confidence');
+  if (swaraNote) swaraNote.textContent = sw.note || (isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna);
+  if (swaraConf) swaraConf.textContent = sw.confidence || '—';
+
+  const glIda = $('glyph-ida');
+  const glSus = $('glyph-sushumna');
+  const glPin = $('glyph-pingala');
+  if (glIda) glIda.className = 'swara-glyph' + (isIda ? ' active-ida' : '');
+  if (glSus) glSus.className = 'swara-glyph' + (isSushumna ? ' active-sushumna' : '');
+  if (glPin) glPin.className = 'swara-glyph' + (isPingala ? ' active-pingala' : '');
+
+  const asym = r.alpha_asymmetry || 0;
+  const clamped = Math.max(-0.5, Math.min(0.5, asym));
+  const pct = (clamped / 0.5) * 50;
+  const thumbL = (50 + pct) + '%';
+  const fillBg = isIda ? 'var(--ida)' : isPingala ? 'var(--pingala)' : 'var(--sushumna)';
+  const thumb = $('asym-thumb');
+  const fillEl = $('asym-fill');
+  if (thumb) { thumb.style.left = thumbL; thumb.style.background = fillBg; }
+  if (fillEl) {
+    if (pct > 0) {
+      fillEl.style.left = '50%';
+      fillEl.style.right = (100 - (50 + pct)) + '%';
+      fillEl.style.background = fillBg;
+    } else if (pct < 0) {
+      fillEl.style.left = (50 + pct) + '%';
+      fillEl.style.right = '50%';
+      fillEl.style.background = fillBg;
+    } else {
+      fillEl.style.left = fillEl.style.right = '50%';
+    }
+  }
+
+  // ── Spectral Band Powers ──
+  const spectrum = r.eeg_spectrum || (r.band_powers && r.band_powers.relative) || {};
+  // Show all 6 bands (high_beta and low_beta are new in v2; beta = combined fallback)
+  const allBands = ['delta', 'theta', 'alpha', 'low_beta', 'high_beta', 'beta', 'gamma'];
+  allBands.forEach(b => {
+    const raw = spectrum[b] ?? null;
+    const pctVal = raw != null ? Math.round(raw * 100) : null;
+    const barEl = $('bar-' + b);
+    const valEl = $('val-' + b);
+    if (barEl) barEl.style.width = (pctVal ?? 0) + '%';
+    if (valEl) valEl.textContent = pctVal != null ? pctVal + '%' : '—';
+  });
+
+  // Update band power state for canvas visualization
+  lastBandPowers = {
+    delta:    spectrum.delta     ?? lastBandPowers.delta,
+    theta:    spectrum.theta     ?? lastBandPowers.theta,
+    alpha:    spectrum.alpha     ?? lastBandPowers.alpha,
+    low_beta: spectrum.low_beta  ?? (spectrum.beta != null ? spectrum.beta * 0.55 : lastBandPowers.low_beta),
+    high_beta:spectrum.high_beta ?? (spectrum.beta != null ? spectrum.beta * 0.45 : lastBandPowers.high_beta),
+    gamma:    spectrum.gamma     ?? lastBandPowers.gamma,
+  };
+
+  // ── Tattva flags ──
+  const flags = r.tattva_flags || [];
+  const tattvaEl = $('tattva-flags');
+  if (tattvaEl) {
+    tattvaEl.innerHTML = flags.length
+      ? flags.map(f => `<span class="tattva-tag">${escHtml(f)}</span>`).join('')
+      : '<span class="tattva-tag muted">None detected</span>';
+  }
+
+  // ── Trigunas ──
+  const gunas = r.gunas || {};
+  const gunaKeys = ['sattva', 'rajas', 'tamas'];
+  gunaKeys.forEach(g => {
+    const val = gunas[g] ?? null;
+    const pctVal = val != null ? Math.round(val * 100) : null;
+    const barEl = $('bar-' + g);
+    const valEl = $('val-' + g);
+    if (barEl) barEl.style.width = (pctVal ?? 0) + '%';
+    if (valEl) valEl.textContent = pctVal != null ? pctVal + '%' : '—';
+  });
+
+  const gunaLabel = gunas.label || (gunas.sattva > gunas.rajas && gunas.sattva > gunas.tamas ? 'Sattvic'
+    : gunas.rajas > gunas.tamas ? 'Rajasic' : gunas.tamas ? 'Tamasic' : '—');
+  const gunaDominantEl = $('gunas-dominant');
+  const gunaNoteEl = $('gunas-note');
+  if (gunaDominantEl) gunaDominantEl.textContent = gunaLabel || '—';
+  if (gunaNoteEl) {
+    gunaNoteEl.textContent = gunaLabel === 'Sattvic' ? 'clarity & balance dominant'
+      : gunaLabel === 'Rajasic' ? 'activity & passion dominant'
+      : gunaLabel === 'Tamasic' ? 'inertia & heaviness dominant' : '';
+  }
+
+  // ── Inner Texture (vṛtti / richness / stillness) ──
+  renderInnerTexture(r);
+
+  // ── Signed corroboration folded under the bhūmi ──
+  renderCorroboration(r);
+
+  // ── Blood oxygen / heart rate (if device supports) ──
+  const spo2El = $('val-spo2');
+  const hrEl = $('val-hr');
+  const spo2StatusEl = $('spo2-status');
+  const hrStatusEl = $('hr-status');
+  if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
+  if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
+  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? 'live reading' : 'awaiting signal';
+  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? 'live reading' : 'awaiting signal';
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+checkAuth();
+
+
+// ── AI Baba state ─────────────────────────────────────────────────────────────
+let aiBabaSessionId   = null;
+let aiBabaSessionName = '';
+let aiBabaChatHistory = [];
+let aiBabaSending     = false;
+
+function aiBabaShowStep(step) {
+  ['pick', 'loading', 'chat'].forEach(s => {
+    const el = $(`ai-baba-step-${s}`);
+    if (el) el.style.display = s === step ? '' : 'none';
+  });
+}
+
+function aiBabaAddMessage(role, text, isError = false) {
+  const msgs = $('ai-baba-messages');
+  if (!msgs) return;
+  const wrap   = document.createElement('div');
+  wrap.className = `ai-msg ai-msg-${role === 'user' ? 'user' : 'bot'}${isError ? ' ai-msg-error' : ''}`;
+  const bubble = document.createElement('div');
+  bubble.className = 'ai-msg-bubble';
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  msgs.appendChild(wrap);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function aiBabaSetTyping(show) {
+  const el      = $('ai-baba-typing');
+  const sendBtn = $('btn-ai-baba-send');
+  if (el)      el.style.display = show ? 'flex' : 'none';
+  if (sendBtn) sendBtn.disabled = show;
+}
+
+async function openAiBaba() {
+  const overlay = $('ai-baba-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+  aiBabaSessionId = null; aiBabaSessionName = ''; aiBabaChatHistory = [];
+  aiBabaShowStep('pick');
+  const msgs = $('ai-baba-messages'), loadingEl = $('ai-baba-sessions-loading'),
+        listEl = $('ai-baba-sessions-list'), emptyEl = $('ai-baba-sessions-empty');
+  if (msgs)      msgs.innerHTML = '';
+  if (loadingEl) loadingEl.style.display = 'flex';
+  if (listEl)    listEl.style.display    = 'none';
+  if (emptyEl)   emptyEl.style.display   = 'none';
+  try {
+    const sessions = await api('GET', '/ai/sessions');
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (!sessions || sessions.length === 0) { if (emptyEl) emptyEl.style.display = ''; return; }
+    if (listEl) {
+      listEl.innerHTML = sessions.map(s => {
+        const date = s.start_time ? new Date(s.start_time).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+        const time = s.start_time ? new Date(s.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
+        const dur  = s.duration_seconds ? `${Math.floor(s.duration_seconds / 60)}m ${s.duration_seconds % 60}s` : '—';
+        const epochs = s.epoch_count || 0, hasData = epochs > 0;
+        return `<div class="ai-baba-session-item" data-id="${escHtml(String(s.id))}" data-name="${escHtml(s.name || 'Session')}"
+                     ${!hasData ? 'style="opacity:0.5;pointer-events:none" aria-disabled="true"' : 'tabindex="0" role="button"'}>
+          <div class="ai-baba-session-item-name">${escHtml(s.name || 'Untitled Session')}</div>
+          <div class="ai-baba-session-item-meta">
+            <span>${escHtml(date)}${time ? ' · ' + escHtml(time) : ''}</span>
+            <span>${escHtml(dur)}</span>
+            <span>${epochs} epoch${epochs !== 1 ? 's' : ''}</span>
+          </div>
+          ${!hasData ? '<div class="ai-baba-session-item-nodata">No EEG data recorded</div>' : ''}
+        </div>`;
+      }).join('');
+      listEl.style.display = '';
+      listEl.querySelectorAll('.ai-baba-session-item[tabindex="0"]').forEach(item => {
+        item.addEventListener('click', () => aiBabaSelectSession(item.dataset.id, item.dataset.name));
+        item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aiBabaSelectSession(item.dataset.id, item.dataset.name); } });
+      });
+    }
+  } catch (err) {
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (emptyEl) {
+      emptyEl.textContent = 'Failed to load sessions — ' + (err.message || 'unknown error') + '. Please try again.';
+      emptyEl.style.display = '';
+    }
+  }
+}
+
+async function aiBabaSelectSession(sessionId, sessionName) {
+  aiBabaSessionId = sessionId; aiBabaSessionName = sessionName; aiBabaChatHistory = [];
+  const msgs = $('ai-baba-messages'); if (msgs) msgs.innerHTML = '';
+  const label = $('ai-baba-session-label'); if (label) label.textContent = sessionName;
+  aiBabaShowStep('loading');
+  try {
+    const data = await api('POST', '/ai/start', { session_id: sessionId });
+    aiBabaShowStep('chat');
+    const summary = data.summary || 'Here is a summary of your session.';
+    aiBabaAddMessage('assistant', summary);
+    aiBabaChatHistory.push({ role: 'assistant', content: summary });
+    setTimeout(() => { const inp = $('ai-baba-input'); if (inp) inp.focus(); }, 100);
+  } catch (err) {
+    aiBabaShowStep('chat');
+    aiBabaAddMessage('assistant',
+      'Namaste 🙏 I had trouble loading your session data.\n\n' +
+      '⚠️ Error: ' + (err.message || 'Unknown error') + '\n\n' +
+      'Please try again or select a different session.', true);
+  }
+}
+
+async function aiBabaSendMessage() {
+  if (aiBabaSending || !aiBabaSessionId) return;
+  const input = $('ai-baba-input'); if (!input) return;
+  const text = input.value.trim(); if (!text) return;
+  input.value = ''; aiBabaSending = true;
+  aiBabaAddMessage('user', text);
+  aiBabaChatHistory.push({ role: 'user', content: text });
+  aiBabaSetTyping(true);
+  const msgs = $('ai-baba-messages'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  try {
+    const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20) });
+    aiBabaSetTyping(false);
+    const reply = data.reply || 'I could not process that. Please try again.';
+    aiBabaAddMessage('assistant', reply);
+    aiBabaChatHistory.push({ role: 'assistant', content: reply });
+  } catch (err) {
+    aiBabaSetTyping(false);
+    aiBabaAddMessage('assistant', 'Something went wrong — ' + (err.message || 'unknown error') + '. Please try again.', true);
+  }
+  aiBabaSending = false;
+}
+
+function closeAiBaba() {
+  const overlay = $('ai-baba-overlay'); if (overlay) overlay.style.display = 'none';
+  document.body.style.overflow = ''; aiBabaSending = false;
+}
+
+(function initAiBaba() {
+  const openBtn = $('btn-ai-baba'), closeBtn = $('btn-ai-baba-close'),
+        overlay = $('ai-baba-overlay'), changeBtn = $('btn-ai-baba-change'),
+        sendBtn = $('btn-ai-baba-send'), input = $('ai-baba-input');
+  if (openBtn)   openBtn.addEventListener('click', openAiBaba);
+  if (closeBtn)  closeBtn.addEventListener('click', closeAiBaba);
+  if (changeBtn) changeBtn.addEventListener('click', openAiBaba);
+  if (sendBtn)   sendBtn.addEventListener('click', aiBabaSendMessage);
+  if (overlay)   overlay.addEventListener('click', e => { if (e.target === overlay) closeAiBaba(); });
+  if (input)     input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); aiBabaSendMessage(); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { const ov = $('ai-baba-overlay'); if (ov && ov.style.display !== 'none') closeAiBaba(); } });
+})();
+
+// Button visibility — syncs with the app shell (shown only when authed).
+(function aiBabaButtonVisibility() {
+  const shell = $('app-shell'), btn = $('btn-ai-baba');
+  if (!shell || !btn) return;
+  function syncVisibility() {
+    btn.style.display = window.getComputedStyle(shell).display !== 'none' ? '' : 'none';
+  }
+  new MutationObserver(syncVisibility).observe(shell, { attributes: true, attributeFilter: ['style', 'class'] });
+  syncVisibility();
+})();
+
+// ════════════════════════════════════════════════════════════════════════════
+// P3 — ANALYZE VIEW: inline-SVG instruments driven by REAL session analytics.
+// Muse/BrainBit = 4 channels → epochs store whole-head band AVERAGES, not per-
+// electrode values, so the sensor schematic is deliberately symmetric (no faked
+// topography). Every instrument coerces null → 0 for geometry and shows "—"/empty
+// states for missing data.
+// ════════════════════════════════════════════════════════════════════════════
+const AN_BAND_COLORS  = { delta:'#9B6FBE', theta:'#5B8DB8', alpha:'#56A67A', beta:'#D4973A', gamma:'#C75C5C' };
+const AN_GUNA_COLORS  = { sattva:'#C9A84C', rajas:'#C75C5C', tamas:'#5A6DAA' };
+const AN_BHUMI_COLORS = { Mudha:'#8A8F98', Kshipta:'#E08030', Vikshipta:'#D97757', Ekagra:'#5B8DB8', Niruddha:'#7C68A8' };
+const AN_SWARA_COLORS = { ida:'#5B8DB8', pingala:'#D97757', sushumna:'#56A67A' };
+const AN_DEPTH_COLORS = { 'Deep Inertia':'#8A8F98', Surface:'#E08030', Emerging:'#D4973A', Deep:'#5B8DB8', Profound:'#7C68A8' };
+const AN_BHUMI_ORDER  = ['Mudha', 'Kshipta', 'Vikshipta', 'Ekagra', 'Niruddha'];
+const AN_DEPTH_ORDER  = ['Deep Inertia', 'Surface', 'Emerging', 'Deep', 'Profound'];
+
+let analyzeSessionId = null;
+
+const anNum = v => (v == null || Number.isNaN(+v)) ? 0 : +v;
+const anPol = (cx, cy, r, deg) => [cx + r * Math.cos(deg * Math.PI / 180), cy + r * Math.sin(deg * Math.PI / 180)];
+function anArcSeg(cx, cy, rO, rI, a0, a1) {
+  const large = (a1 - a0) % 360 > 180 ? 1 : 0;
+  const [x0, y0] = anPol(cx, cy, rO, a0), [x1, y1] = anPol(cx, cy, rO, a1);
+  const [x2, y2] = anPol(cx, cy, rI, a1), [x3, y3] = anPol(cx, cy, rI, a0);
+  const f = n => n.toFixed(2);
+  return `M${f(x0)} ${f(y0)} A${rO} ${rO} 0 ${large} 1 ${f(x1)} ${f(y1)} L${f(x2)} ${f(y2)} A${rI} ${rI} 0 ${large} 0 ${f(x3)} ${f(y3)} Z`;
+}
+function anSetEmpty(msg) {
+  $('analyze-empty').style.display = '';
+  $('analyze-body').style.display = 'none';
+  const p = $('analyze-empty').querySelector('p'); if (p) p.textContent = msg;
+}
+
+async function onShowAnalyze() {
+  const picker = $('analyze-session-picker');
+  if (!picker) return;
+  try {
+    const sessions = await api('GET', '/sessions/mine');
+    if (!sessions.length) { picker.innerHTML = '<option value="">No sessions</option>'; anSetEmpty('Record a session first, then analyze it here.'); return; }
+    picker.innerHTML = sessions.map(s =>
+      `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
+    const preferred = analyzeSessionId
+      || (typeof currentAnalyticsSessionId !== 'undefined' && currentAnalyticsSessionId)
+      || sessions[0].id;
+    if (sessions.some(s => String(s.id) === String(preferred))) picker.value = String(preferred);
+    picker.onchange = () => loadAnalyzeSession(picker.value);
+    await loadAnalyzeSession(picker.value);
+  } catch (err) {
+    anSetEmpty('Could not load sessions: ' + err.message);
+  }
+}
+
+async function loadAnalyzeSession(id) {
+  analyzeSessionId = id;
+  if (!id) return;
+  try {
+    const a = await api('GET', '/sessions/' + id + '/analytics');
+    if (!a.summary || !a.summary.totalEpochs) { anSetEmpty('This session has no epoch data to analyze.'); return; }
+    const eps = await api('GET', '/sessions/' + id + '/epochs').catch(() => []);
+    const s = a.summary;
+    $('analyze-empty').style.display = 'none';
+    $('analyze-body').style.display = '';
+    $('analyze-session-meta').textContent =
+      `${s.totalEpochs} epochs · ${formatDuration(s.durationSeconds || 0)} · dominant: ${s.dominantState || '—'}`;
+    drawBandRadar(s.avgBands || {});
+    drawGunaTriangle(s.avgGunas || {});
+    drawBhumiRing(s.stateCounts || {});
+    drawSwaraGauge(s.swaraCounts || {});
+    drawDepthMeter(eps, s);
+    drawSensorSchematic(s.avgBands || {});
+  } catch (err) {
+    anSetEmpty('Could not load analytics: ' + err.message);
+  }
+}
+
+function drawBandRadar(avgBands) {
+  const bands = ['delta', 'theta', 'alpha', 'beta', 'gamma'];
+  const maxR = 100, n = bands.length, ang = i => -90 + i * (360 / n);
+  let svg = '';
+  for (const fr of [0.25, 0.5, 0.75, 1]) {
+    const pts = bands.map((_, i) => anPol(0, 0, maxR * fr, ang(i)).map(v => v.toFixed(1)).join(',')).join(' ');
+    svg += `<polygon points="${pts}" fill="none" stroke="var(--border)" stroke-width="1" opacity="0.6"/>`;
+  }
+  bands.forEach((b, i) => {
+    const [ax, ay] = anPol(0, 0, maxR, ang(i));
+    svg += `<line x1="0" y1="0" x2="${ax.toFixed(1)}" y2="${ay.toFixed(1)}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>`;
+    const [lx, ly] = anPol(0, 0, maxR + 17, ang(i));
+    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${b}</text>`;
+  });
+  const dpts = bands.map((b, i) => anPol(0, 0, maxR * Math.max(0, Math.min(1, anNum(avgBands[b]))), ang(i)).map(v => v.toFixed(1)).join(',')).join(' ');
+  svg += `<polygon points="${dpts}" fill="var(--accent)" fill-opacity="0.28" stroke="var(--accent)" stroke-width="2"/>`;
+  bands.forEach((b, i) => {
+    const [px, py] = anPol(0, 0, maxR * Math.max(0, Math.min(1, anNum(avgBands[b]))), ang(i));
+    svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="3" fill="${AN_BAND_COLORS[b]}"/>`;
+  });
+  $('an-band-radar').innerHTML = svg;
+}
+
+function drawGunaTriangle(g) {
+  const V = { sattva: [0, -90], rajas: [85, 60], tamas: [-85, 60] };
+  let svg = `<polygon points="${V.sattva.join(',')} ${V.rajas.join(',')} ${V.tamas.join(',')}" fill="none" stroke="var(--border)" stroke-width="1.5"/>`;
+  for (const k of ['sattva', 'rajas', 'tamas']) {
+    const [vx, vy] = V[k], lx = vx * 1.16, ly = vy === -90 ? vy - 9 : vy + 18;
+    svg += `<circle cx="${vx}" cy="${vy}" r="4" fill="${AN_GUNA_COLORS[k]}"/>`;
+    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${k}</text>`;
+  }
+  const s = anNum(g.sattva), r = anNum(g.rajas), t = anNum(g.tamas), sum = s + r + t;
+  if (sum > 0) {
+    const px = (s * V.sattva[0] + r * V.rajas[0] + t * V.tamas[0]) / sum;
+    const py = (s * V.sattva[1] + r * V.rajas[1] + t * V.tamas[1]) / sum;
+    svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="1.5"/>`;
+  } else {
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">no guṇa data</text>`;
+  }
+  $('an-guna-tri').innerHTML = svg;
+}
+
+function drawBhumiRing(counts) {
+  const rO = 95, rI = 58;
+  const entries = AN_BHUMI_ORDER.filter(k => counts[k]).map(k => [k, counts[k]]);
+  Object.keys(counts).forEach(k => { if (!AN_BHUMI_ORDER.includes(k) && counts[k]) entries.push([k, counts[k]]); });
+  const sum = entries.reduce((a, [, c]) => a + c, 0);
+  let svg = '';
+  if (!sum) {
+    svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="var(--bg-card-2)" stroke-width="${rO - rI}"/>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">no data</text>`;
+  } else if (entries.length === 1) {
+    const [k] = entries[0];
+    svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="${AN_BHUMI_COLORS[k] || 'var(--accent)'}" stroke-width="${rO - rI}"/>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(k)}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">100%</text>`;
+  } else {
+    let a0 = -90;
+    entries.forEach(([k, c]) => {
+      const sweep = c / sum * 360, a1 = a0 + sweep, col = AN_BHUMI_COLORS[k] || 'var(--text-muted)';
+      svg += `<path d="${anArcSeg(0, 0, rO, rI, a0, a1)}" fill="${col}"/>`;
+      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${Math.round(c / sum * 100)}%</text>`; }
+      a0 = a1;
+    });
+    const dom = entries.slice().sort((a, b) => b[1] - a[1])[0][0];
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(dom)}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">dominant</text>`;
+  }
+  $('an-bhumi-ring').innerHTML = svg;
+}
+
+function drawSwaraGauge(counts) {
+  const cx = 120, cy = 100, r = 90, rI = 58, order = ['ida', 'sushumna', 'pingala'];
+  const sum = order.reduce((a, k) => a + anNum(counts[k]), 0);
+  let svg = '';
+  if (!sum) {
+    svg += `<path d="${anArcSeg(cx, cy, r, rI, 180, 360)}" fill="var(--bg-card-2)"/>`;
+    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">no svara data</text>`;
+  } else {
+    let a0 = 180;
+    order.forEach(k => { const frac = anNum(counts[k]) / sum; if (frac <= 0) return; const a1 = a0 + frac * 180; svg += `<path d="${anArcSeg(cx, cy, r, rI, a0, a1)}" fill="${AN_SWARA_COLORS[k]}"/>`; a0 = a1; });
+    const t = (anNum(counts.pingala) + 0.5 * anNum(counts.sushumna)) / sum;
+    const [nx, ny] = anPol(cx, cy, r - 6, 180 + t * 180);
+    svg += `<line x1="${cx}" y1="${cy}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="var(--text)" stroke-width="2.5" stroke-linecap="round"/>`;
+    svg += `<circle cx="${cx}" cy="${cy}" r="5" fill="var(--text)"/>`;
+  }
+  const lx = [24, 108, 188];
+  order.forEach((k, i) => {
+    svg += `<circle cx="${lx[i]}" cy="118" r="4" fill="${AN_SWARA_COLORS[k]}"/>`;
+    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${k} ${anNum(counts[k])}</text>`;
+  });
+  $('an-swara-gauge').innerHTML = svg;
+}
+
+function drawDepthMeter(eps, summary) {
+  const counts = {}; AN_DEPTH_ORDER.forEach(d => counts[d] = 0);
+  let n = 0;
+  (eps || []).forEach(e => { const d = e.contemplativeDepth; if (d != null && counts[d] !== undefined) { counts[d]++; n++; } });
+  const x0 = 12, w = 216, y = 34, h = 22;
+  let svg = '';
+  if (n > 0) {
+    let x = x0;
+    AN_DEPTH_ORDER.forEach(d => { const segW = counts[d] / n * w; if (segW > 0) { svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="${h}" fill="${AN_DEPTH_COLORS[d]}"/>`; x += segW; } });
+  } else {
+    svg += `<rect x="${x0}" y="${y}" width="${w}" height="${h}" fill="var(--bg-card-2)"/>`;
+    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">no depth data</text>`;
+  }
+  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(t => { const tx = x0 + (DEPTH_PCT[t] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${t}</text>`; });
+  const domDepth = CHITTA_DEPTHS[summary.dominantState];
+  if (domDepth && DEPTH_PCT[domDepth] != null) {
+    const mx = x0 + (DEPTH_PCT[domDepth] / 100) * w;
+    svg += `<polygon points="${mx.toFixed(1)},${y - 5} ${(mx - 5).toFixed(1)},${y - 13} ${(mx + 5).toFixed(1)},${y - 13}" fill="var(--text)"/>`;
+    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${escHtml(domDepth)}</text>`;
+  }
+  $('an-depth-meter').innerHTML = svg;
+}
+
+function drawSensorSchematic(avgBands) {
+  const bands = ['delta', 'theta', 'alpha', 'beta', 'gamma'];
+  let dom = 'alpha', max = -1;
+  bands.forEach(b => { const v = anNum(avgBands[b]); if (v > max) { max = v; dom = b; } });
+  const col = AN_BAND_COLORS[dom], r = 48;
+  let svg = `<circle cx="0" cy="0" r="${r}" fill="none" stroke="var(--border)" stroke-width="2"/>`;
+  svg += `<polygon points="0,${-r - 10} -7,${-r} 7,${-r}" fill="none" stroke="var(--border)" stroke-width="2"/>`;
+  const dots = { T3: [-34, -6], T4: [34, -6], O1: [-22, 34], O2: [22, 34] };
+  Object.entries(dots).forEach(([lbl, [dx, dy]]) => {
+    svg += `<circle cx="${dx}" cy="${dy}" r="9" fill="${col}" fill-opacity="0.55" stroke="${col}" stroke-width="2"/>`;
+    svg += `<text x="${dx}" y="${dy + 3}" fill="var(--text)" font-size="8" font-weight="700" text-anchor="middle">${lbl}</text>`;
+  });
+  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? dom + ' dominant' : 'no band data'}</text>`;
+  $('an-sensor').innerHTML = svg;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// P2 — HOME / COHORT / CLIENT VIEWS (backed by P1's clients endpoints).
+// Everything is derived from real /clients + /sessions data — no fabricated KPIs.
+// ════════════════════════════════════════════════════════════════════════════
+let selectedClientId = null;
+
+const CLIENT_STATUS = {
+  plateau:  { label: 'Plateau',         cls: 'status--plateau' },
+  progress: { label: 'Progress',        cls: 'status--progress' },
+  issue:    { label: 'Needs attention', cls: 'status--issue' },
+  new:      { label: 'New',             cls: 'status--new' },
+};
+
+function monthsSince(iso) {
+  if (!iso) return '';
+  const then = new Date(iso), now = new Date();
+  let m = (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
+  m = Math.max(0, m);
+  if (m < 1) return '<1 month practicing';
+  if (m < 12) return `${m} month${m === 1 ? '' : 's'} practicing`;
+  return `${Math.floor(m / 12)}y ${m % 12}m practicing`;
+}
+function isAttention(c) {
+  if (c.status === 'issue' || c.status === 'plateau') return true;
+  if (!c.lastSessionAt) return false;
+  return (Date.now() - new Date(c.lastSessionAt).getTime()) > 14 * 864e5;
+}
+
+// One delegated handler for cohort tiles → client, and session rows/dots → replay.
+document.addEventListener('click', e => {
+  const sessionEl = e.target.closest('[data-session-id]');
+  if (sessionEl) { pendingReplaySessionId = sessionEl.dataset.sessionId; showView('replay'); return; }
+  const clientEl = e.target.closest('[data-client-id]');
+  if (clientEl) { selectedClientId = clientEl.dataset.clientId; showView('client'); }
+});
+
+// ── Home ("This Week") ──
+async function onShowHome() {
+  try {
+    const [clients, sessions] = await Promise.all([
+      api('GET', '/clients'),
+      api('GET', '/sessions/mine').catch(() => []),
+    ]);
+    sessions.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+    renderHomeKpis(clients, sessions);
+    renderHomeAttention(clients);
+    renderHomeRecent(sessions, clients);
+  } catch (e) { showToast(e.message); }
+}
+function renderHomeKpis(clients, sessions) {
+  const weekAgo = Date.now() - 7 * 864e5;
+  const thisWeek = sessions.filter(s => new Date(s.startTime).getTime() >= weekAgo).length;
+  const cells = [
+    ['Clients', clients.length],
+    ['Sessions this week', thisWeek],
+    ['Needs attention', clients.filter(isAttention).length],
+    ['Total sessions', sessions.length],
+  ];
+  $('home-kpis').innerHTML = cells.map(([k, v]) =>
+    `<div class="kpi"><span class="kpi__value">${v}</span><span class="kpi__label">${k}</span></div>`).join('');
+}
+function renderHomeAttention(clients) {
+  const el = $('home-attention'), flagged = clients.filter(isAttention);
+  if (!flagged.length) { el.innerHTML = '<div class="empty-state">All clients on track.</div>'; return; }
+  el.innerHTML = flagged.map(c => {
+    const st = CLIENT_STATUS[c.status];
+    const reason = (c.status === 'issue' || c.status === 'plateau') && st ? st.label : 'No recent session';
+    return `<button class="hub-row" data-client-id="${c.id}"><span class="hub-row__name">${escHtml(c.name)}</span><span class="hub-row__meta">${reason}</span></button>`;
+  }).join('');
+}
+function renderHomeRecent(sessions, clients) {
+  const el = $('home-recent');
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
+  const byId = Object.fromEntries(clients.map(c => [String(c.id), c.name]));
+  el.innerHTML = sessions.slice(0, 8).map(s => {
+    const cn = s.clientId != null ? (byId[String(s.clientId)] || 'Unknown client') : 'Unassigned';
+    return `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${escHtml(cn)} · ${formatDate(s.startTime)}</span></button>`;
+  }).join('');
+}
+
+// ── Cohort grid ──
+async function onShowCohort() {
+  const grid = $('cohort-grid');
+  try {
+    const clients = await api('GET', '/clients');
+    $('cohort-title').textContent = `Cohort · ${clients.length} client${clients.length === 1 ? '' : 's'}`;
+    if (!clients.length) { grid.innerHTML = '<div class="empty-state">No clients yet. Add your first client to start building a cohort.</div>'; return; }
+    grid.innerHTML = clients.map(renderClientTile).join('');
+  } catch (e) { grid.innerHTML = `<div class="empty-state">${escHtml(e.message)}</div>`; }
+}
+function renderClientTile(c) {
+  const st = CLIENT_STATUS[c.status];
+  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : 'no sessions yet';
+  const n = c.sessionsCount ?? 0;
+  return `<button class="client-tile" data-client-id="${c.id}">
+    <div class="client-tile__top"><span class="client-tile__name">${escHtml(c.name)}</span>${st ? `<span class="client-status ${st.cls}">${st.label}</span>` : ''}</div>
+    <div class="client-tile__meta">${n} session${n === 1 ? '' : 's'} · ${last}</div>
+    ${c.protocol ? `<div class="client-tile__protocol">${escHtml(c.protocol)}</div>` : ''}
+  </button>`;
+}
+
+// ── Client profile ──
+async function onShowClient() {
+  const empty = $('client-empty'), body = $('client-body');
+  if (!selectedClientId) { empty.style.display = ''; empty.textContent = 'Select a client from the Cohort view.'; body.style.display = 'none'; return; }
+  try {
+    const [c, sessions] = await Promise.all([
+      api('GET', '/clients/' + selectedClientId),
+      api('GET', '/clients/' + selectedClientId + '/sessions').catch(() => []),
+    ]);
+    empty.style.display = 'none'; body.style.display = '';
+    renderClientHeader(c);
+    renderClientStats(c);
+    renderClientDots(sessions);
+    renderClientSessions(sessions);
+    renderClientReco(c);
+    renderClientNotes(c);
+  } catch (e) {
+    empty.style.display = ''; body.style.display = 'none';
+    empty.textContent = 'Could not load client: ' + e.message;
+  }
+}
+function renderClientHeader(c) {
+  $('client-name').textContent = c.name;
+  const bits = [];
+  if (c.age != null) bits.push(c.age + ' yrs');
+  if (c.practicingSince) bits.push(monthsSince(c.practicingSince));
+  const st = CLIENT_STATUS[c.status];
+  if (st) bits.push(st.label);
+  $('client-meta').innerHTML = bits.map(escHtml).join(' · ');
+}
+function renderClientStats(c) {
+  const cells = [
+    ['Sessions', c.sessionsCount ?? 0],
+    ['Last session', c.lastSessionAt ? formatDate(c.lastSessionAt) : '—'],
+    ['Protocol since', c.protocolSince ? formatDate(c.protocolSince) : '—'],
+  ];
+  $('client-stats').innerHTML = cells.map(([k, v]) =>
+    `<div class="stat"><span class="stat__label">${k}</span><span class="stat__value">${escHtml(String(v))}</span></div>`).join('');
+}
+function renderClientDots(sessions) {
+  const el = $('client-dots');
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions recorded for this client yet.</div>'; return; }
+  const maxDur = Math.max(...sessions.map(s => s.duration || 0), 1);
+  el.innerHTML = sessions.slice().reverse().map(s => {
+    const d = s.duration || 0, size = 14 + Math.round((d / maxDur) * 22);
+    return `<button class="timeline-dot" data-session-id="${s.id}" title="${escHtml(s.name)} · ${d ? formatDuration(d) : 'in progress'}" style="width:${size}px;height:${size}px"></button>`;
+  }).join('');
+}
+function renderClientSessions(sessions) {
+  const el = $('client-sessions');
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
+  el.innerHTML = sessions.map(s =>
+    `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${formatDate(s.startTime)} · ${s.duration ? formatDuration(s.duration) : '—'}</span></button>`).join('');
+}
+function renderClientReco(c) {
+  const el = $('client-reco');
+  if (!c.protocol && !c.goal) { el.innerHTML = '<div class="empty-state">No protocol set. Use Edit to add one.</div>'; return; }
+  el.innerHTML = (c.protocol ? `<div class="reco__protocol">${escHtml(c.protocol)}</div>` : '') +
+    (c.goal ? `<div class="reco__goal">Goal: ${escHtml(c.goal)}</div>` : '');
+}
+function renderClientNotes(c) {
+  $('client-notes').innerHTML = c.notes && c.notes.trim()
+    ? escHtml(c.notes).replace(/\n/g, '<br>')
+    : '<div class="empty-state">No notes yet.</div>';
+}
+
+// ── Add / edit / back actions ──
+$('btn-add-client').addEventListener('click', async () => {
+  const name = prompt('New client name:');
+  if (!name || !name.trim()) return;
+  try {
+    await api('POST', '/clients', { name: name.trim() });
+    showToast('Client added');
+    loadClientOptions();
+    onShowCohort();
+  } catch (e) { showToast(e.message); }
+});
+$('btn-back-cohort').addEventListener('click', () => showView('cohort'));
+$('btn-edit-client').addEventListener('click', async () => {
+  if (!selectedClientId) return;
+  const protocol = prompt('Protocol (blank = keep current):');
+  if (protocol === null) return;
+  const notes = prompt('Teacher notes (blank = keep current):');
+  if (notes === null) return;
+  const body = {};
+  if (protocol !== '') body.protocol = protocol;
+  if (notes !== '') body.notes = notes;
+  if (!Object.keys(body).length) return;
+  try { await api('PUT', '/clients/' + selectedClientId, body); showToast('Saved'); onShowClient(); }
+  catch (e) { showToast(e.message); }
+});
