@@ -165,6 +165,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font); min-
 .metric-label { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); }
 .metric-value { font-size: 13px; font-weight: 600; color: var(--text); }
 .metric-unit  { font-size: 10px; color: var(--text-muted); }
+.metric-value.blink-flash { color: var(--accent, #56A67A); transition: color 0.25s ease; }
 .status-indicator { display: flex; align-items: center; gap: 6px; }
 .status-dot  { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
 .status-dot.connected { background: var(--alpha); box-shadow: 0 0 6px var(--alpha); }
