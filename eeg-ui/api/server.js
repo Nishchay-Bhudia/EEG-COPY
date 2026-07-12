@@ -193,6 +193,18 @@ const mapEpoch = r => ({
   tattvaFlags: r.tattva_flags || [],
   bloodOxygen: r.blood_oxygen != null ? parseFloat(r.blood_oxygen) : null,
   heartRate: r.heart_rate != null ? parseFloat(r.heart_rate) : null,
+  vrittiIndex: r.vritti_index != null ? parseFloat(r.vritti_index) : null,
+  nirodhaState: r.nirodha_state || null,
+  complexity: r.complexity_lziv != null ? {
+    lziv: parseFloat(r.complexity_lziv),
+    higuchiFd: parseFloat(r.complexity_higuchi_fd),
+    sampleEntropy: parseFloat(r.complexity_sample_entropy),
+    permEntropy: parseFloat(r.complexity_perm_entropy),
+  } : null,
+  aperiodic: r.aperiodic_exponent != null ? {
+    exponent: parseFloat(r.aperiodic_exponent),
+    offset: parseFloat(r.aperiodic_offset),
+  } : null,
 });
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -867,14 +879,20 @@ router.post('/sessions/:id/epoch', requireAuth, async (req, res) => {
          swara, swara_confidence,
          delta_power, theta_power, alpha_power, beta_power, gamma_power,
          sattva, rajas, tamas, guna_label,
-         tattva_flags, blood_oxygen, heart_rate
+         tattva_flags, blood_oxygen, heart_rate,
+         vritti_index, nirodha_state,
+         complexity_lziv, complexity_higuchi_fd, complexity_sample_entropy, complexity_perm_entropy,
+         aperiodic_exponent, aperiodic_offset
        ) VALUES (
          $1, $2, NOW(), $3,
          $4, $5, $6,
          $7, $8,
          $9, $10, $11, $12, $13,
          $14, $15, $16, $17,
-         $18, $19, $20
+         $18, $19, $20,
+         $21, $22,
+         $23, $24, $25, $26,
+         $27, $28
        )`,
       [
         sessionId, b.epochNum, b.elapsedSeconds,
@@ -883,6 +901,9 @@ router.post('/sessions/:id/epoch', requireAuth, async (req, res) => {
         b.bands?.delta, b.bands?.theta, b.bands?.alpha, b.bands?.beta, b.bands?.gamma,
         b.gunas?.sattva, b.gunas?.rajas, b.gunas?.tamas, b.gunas?.label,
         JSON.stringify(b.tattvaFlags || []), b.bloodOxygen, b.heartRate,
+        b.vrittiIndex, b.nirodhaState,
+        b.complexity?.lziv, b.complexity?.higuchiFd, b.complexity?.sampleEntropy, b.complexity?.permEntropy,
+        b.aperiodic?.exponent, b.aperiodic?.offset,
       ]
     );
     res.status(201).json({ ok: true });
@@ -931,6 +952,10 @@ router.get('/sessions/:id/analytics', requireAuth, async (req, res) => {
     let alphaSum = 0, thetaSum = 0, alphaCount = 0, thetaCount = 0;
     let spo2Sum = 0, spo2Count = 0, hrSum = 0, hrCount = 0;
     let sattvaSum = 0, rajasSum = 0, tamasSum = 0, gunaCount = 0;
+    let vrittiSum = 0, vrittiCount = 0;
+    let lzivSum = 0, hfdSum = 0, seSum = 0, peSum = 0, complexityCount = 0;
+    let apxSum = 0, apoSum = 0, aperiodicCount = 0;
+    const tattvaFlagCounts = {};
     const bandSums = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 };
     const bandCounts = { delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0 };
     for (const ep of epochs) {
@@ -943,6 +968,22 @@ router.get('/sessions/:id/analytics', requireAuth, async (req, res) => {
       if (ep.sattva != null && ep.rajas != null && ep.tamas != null) {
         sattvaSum += parseFloat(ep.sattva); rajasSum += parseFloat(ep.rajas); tamasSum += parseFloat(ep.tamas);
         gunaCount++;
+      }
+      if (ep.vritti_index != null) { vrittiSum += parseFloat(ep.vritti_index); vrittiCount++; }
+      if (ep.complexity_lziv != null) {
+        lzivSum += parseFloat(ep.complexity_lziv);
+        hfdSum += parseFloat(ep.complexity_higuchi_fd);
+        seSum += parseFloat(ep.complexity_sample_entropy);
+        peSum += parseFloat(ep.complexity_perm_entropy);
+        complexityCount++;
+      }
+      if (ep.aperiodic_exponent != null) {
+        apxSum += parseFloat(ep.aperiodic_exponent);
+        apoSum += parseFloat(ep.aperiodic_offset);
+        aperiodicCount++;
+      }
+      for (const f of (ep.tattva_flags || [])) {
+        tattvaFlagCounts[f] = (tattvaFlagCounts[f] || 0) + 1;
       }
       for (const k of ['delta', 'theta', 'alpha', 'beta', 'gamma']) {
         const v = ep[k + '_power'];
@@ -961,6 +1002,22 @@ router.get('/sessions/:id/analytics', requireAuth, async (req, res) => {
     for (const k of ['delta', 'theta', 'alpha', 'beta', 'gamma']) {
       avgBands[k] = bandCounts[k] ? bandSums[k] / bandCounts[k] : null;
     }
+
+    const avgVritti = vrittiCount ? vrittiSum / vrittiCount : null;
+    const avgComplexity = complexityCount ? {
+      lziv: lzivSum / complexityCount,
+      higuchiFd: hfdSum / complexityCount,
+      sampleEntropy: seSum / complexityCount,
+      permEntropy: peSum / complexityCount,
+    } : null;
+    const avgAperiodic = aperiodicCount ? {
+      exponent: apxSum / aperiodicCount,
+      offset: apoSum / aperiodicCount,
+    } : null;
+    // Tattva/Chakra flags seen across the session, most-frequent first.
+    const tattvaFlags = Object.entries(tattvaFlagCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([flag, count]) => ({ flag, count }));
 
     // Phase compression
     const phases = [];
@@ -1023,6 +1080,10 @@ router.get('/sessions/:id/analytics', requireAuth, async (req, res) => {
         dominantGuna,
         avgSpo2: spo2Count ? spo2Sum / spo2Count : null,
         avgHr: hrCount ? hrSum / hrCount : null,
+        avgVritti,
+        avgComplexity,
+        avgAperiodic,
+        tattvaFlags,
       },
       phases,
     });

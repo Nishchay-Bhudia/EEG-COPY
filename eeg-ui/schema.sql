@@ -92,8 +92,29 @@ CREATE TABLE IF NOT EXISTS eeg_epochs (
 
   -- Vitals (from BLE pulse oximeter / demo mode)
   blood_oxygen        NUMERIC(5,2),                   -- SpO2 %
-  heart_rate          NUMERIC(5,2)                     -- BPM
+  heart_rate          NUMERIC(5,2),                    -- BPM
+
+  -- Inner Texture / deep-state features (v3) — vṛtti index, complexity, aperiodic.
+  -- Previously computed by the analyser but never persisted, so Replay/Analyze
+  -- always showed them empty even though the live epoch had real values.
+  vritti_index         NUMERIC(6,4),
+  nirodha_state         TEXT,
+  complexity_lziv        NUMERIC(6,4),
+  complexity_higuchi_fd  NUMERIC(6,4),
+  complexity_sample_entropy NUMERIC(6,4),
+  complexity_perm_entropy   NUMERIC(6,4),
+  aperiodic_exponent     NUMERIC(6,4),
+  aperiodic_offset       NUMERIC(6,4)
 );
+
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS vritti_index NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS nirodha_state TEXT;
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_lziv NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_higuchi_fd NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_sample_entropy NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_perm_entropy NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS aperiodic_exponent NUMERIC(6,4);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS aperiodic_offset NUMERIC(6,4);
 
 CREATE INDEX IF NOT EXISTS idx_epoch_session ON eeg_epochs (session_id, epoch_num);
 

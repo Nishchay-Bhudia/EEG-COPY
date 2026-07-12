@@ -29,8 +29,11 @@ const {
   bufferCount, latestSamples, error, COLLECT_N,
 } = driver;
 
-// ── Backend URL (external Render analyzer — NOT the /api Express backend) ──────
-const backendUrl = (localStorage.getItem('controlhub_url') || 'https://eeg-backend-5.onrender.com').replace(/\/$/, '');
+// ── Backend URL (the .NET analyser — NOT the /api Express backend) ─────────────
+// Defaults to the local analyser for local dev; a stale/unreachable remote
+// default here silently degrades every reading to the local FFT fallback (no
+// gunas, no inner-texture). Override via Settings for a remote deployment.
+const backendUrl = (localStorage.getItem('controlhub_url') || 'http://localhost:5094').replace(/\/$/, '');
 
 // ── Mode / reading state ──────────────────────────────────────────────────────
 const mode = ref('idle');           // 'idle' | 'demo' | 'bluetooth'

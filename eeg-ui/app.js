@@ -54,7 +54,12 @@ const SWARA_NOTES = {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let mode = 'idle';
-let backendUrl = localStorage.getItem('controlhub_url') || 'https://eeg-backend-5.onrender.com';
+// Default to the local .NET analyser for local dev. A stale/unreachable remote
+// default here silently degrades every reading to the local FFT fallback (no
+// gunas, no inner-texture, weaker tattva flags) with only a console warning —
+// see eeg-backend/docs/IMPLEMENTATION_PLAN.md guardrails. Override via the
+// backend-URL field in Settings for a remote deployment.
+let backendUrl = localStorage.getItem('controlhub_url') || 'http://localhost:5094';
 let btDevice = null;
 let btDisconnect = null;
 let activeDriver = null;              // the headband driver in use this connection
@@ -887,6 +892,15 @@ function updateReplayDisplay(idx) {
     gunas: ep.gunas || null,
     blood_oxygen: ep.bloodOxygen,
     heart_rate: ep.heartRate,
+    vritti_index: ep.vrittiIndex ?? null,
+    nirodha_state: ep.nirodhaState || null,
+    complexity: ep.complexity ? {
+      lziv: ep.complexity.lziv,
+      higuchi_fd: ep.complexity.higuchiFd,
+      sample_entropy: ep.complexity.sampleEntropy,
+      perm_entropy: ep.complexity.permEntropy,
+    } : null,
+    aperiodic: ep.aperiodic || null,
     latency_ms: null,
     data_quality: '⏪ replay',
   });
@@ -1029,6 +1043,20 @@ function storeEpochToSession(r) {
     tattvaFlags: flags || [],
     bloodOxygen: r.blood_oxygen != null ? r.blood_oxygen : null,
     heartRate: r.heart_rate != null ? r.heart_rate : null,
+    // Inner Texture (v3 deep-state features) — previously dropped here, so
+    // Replay/Analyze always showed them empty even on a live epoch with data.
+    vrittiIndex: r.vritti_index ?? null,
+    nirodhaState: r.nirodha_state || null,
+    complexity: r.complexity ? {
+      lziv: r.complexity.lziv ?? null,
+      higuchiFd: r.complexity.higuchi_fd ?? null,
+      sampleEntropy: r.complexity.sample_entropy ?? null,
+      permEntropy: r.complexity.perm_entropy ?? null,
+    } : null,
+    aperiodic: r.aperiodic ? {
+      exponent: r.aperiodic.exponent ?? null,
+      offset: r.aperiodic.offset ?? null,
+    } : null,
   };
 
   api('POST', '/sessions/' + activeSession.id + '/epoch', epochBody)
@@ -1065,6 +1093,9 @@ function fft(signal) {
   return mags;
 }
 
+// Band edges match the .NET analyser's FeatureExtractor exactly (delta 0.5-4,
+// theta 4-8, alpha 8-13, low_beta 13-18, high_beta 18-30, gamma 30-50) so the
+// local fallback's Rajas marker (high-beta) lines up with the real classifier.
 function bandPowers(mags, sr, sz) {
   const res = sr / sz;
   const bin = hz => Math.round(hz / res);
@@ -1073,9 +1104,49 @@ function bandPowers(mags, sr, sz) {
     for (let b = bin(lo); b <= Math.min(bin(hi), mags.length-1); b++) s += mags[b]*mags[b];
     return s;
   };
-  const d=sum(0.5,4), t=sum(4,8), a=sum(8,13), be=sum(13,30), g=sum(30,50);
-  const tot = d+t+a+be+g || 1;
-  return { delta:d/tot, theta:t/tot, alpha:a/tot, beta:be/tot, gamma:g/tot };
+  const d=sum(0.5,4), t=sum(4,8), a=sum(8,13), lb=sum(13,18), hb=sum(18,30), g=sum(30,50);
+  const tot = d+t+a+lb+hb+g || 1;
+  return { delta:d/tot, theta:t/tot, alpha:a/tot, low_beta:lb/tot, high_beta:hb/tot, beta:(lb+hb)/tot, gamma:g/tot };
+}
+
+// ── Local Guna classifier — faithful port of the backend's GunaClassifier +
+// GunaBlend (eeg-backend/src/NeuroYogic.Analysis/Classification/GunaClassifier.cs,
+// GunaBlend.cs). Used only when the .NET analyser is unreachable, so this fallback
+// no longer silently drops Gunas/vṛtti — see IMPLEMENTATION_PLAN.md guardrails.
+function classifyGunasLocal(bp, faa, plv, swaraNadi) {
+  const relu = x => Math.max(0, x);
+  let sat = bp.alpha*4.5 + bp.theta*2.5 + bp.low_beta*0.8 + relu(plv-0.50)*2.5 + relu(0.20-Math.abs(faa))*1.5;
+  let raj = bp.high_beta*5.5 + relu(0.20-bp.alpha)*2.0 + relu(faa)*1.8 + relu(bp.gamma-0.10)*0.8;
+  let tam = bp.delta*4.5 + relu(0.15-bp.alpha)*2.5 + relu(0.06-bp.gamma)*2.0 + relu(0.45-plv)*1.0;
+
+  if (swaraNadi === 'sushumna') { sat += 0.20; raj = Math.max(0, raj-0.10); }
+  else if (swaraNadi === 'pingala') { raj += 0.15; sat = Math.max(0, sat-0.05); }
+  else if (swaraNadi === 'ida') { if (bp.delta > 0.30) tam += 0.10; else sat += 0.08; }
+
+  sat = Math.max(sat, 0.01); raj = Math.max(raj, 0.01); tam = Math.max(tam, 0.01);
+  const total = sat + raj + tam;
+  const sattva = sat/total, rajas = raj/total, tamas = tam/total;
+
+  const ranked = [['Sattva', sattva], ['Rajas', rajas], ['Tamas', tamas]].sort((a,b) => b[1]-a[1]);
+  const [g1, v1] = ranked[0], [g2] = ranked[1], [, v3] = ranked[2];
+  const adj = { Sattva: 'Sattvic', Rajas: 'Rajasic', Tamas: 'Tamasic' };
+  let label;
+  if (v1 - v3 < 0.12) label = 'Balanced (all three)';
+  else if (ranked[1][1] >= 0.50 * v1) label = `${adj[g1]}-predominant, ${adj[g2]}-secondary`;
+  else label = adj[g1];
+
+  return { sattva, rajas, tamas, label };
+}
+
+function pearsonCorr(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  let ma=0, mb=0;
+  for (let i=0;i<n;i++){ ma+=a[i]; mb+=b[i]; }
+  ma/=n; mb/=n;
+  let num=0, da=0, db=0;
+  for (let i=0;i<n;i++){ const xa=a[i]-ma, xb=b[i]-mb; num+=xa*xb; da+=xa*xa; db+=xb*xb; }
+  return num / (Math.sqrt(da*db) || 1e-9);
 }
 
 function softmax(logits) {
@@ -1083,7 +1154,10 @@ function softmax(logits) {
   return ex.map(e=>e/s);
 }
 
-function classifyLocal(bp) {
+// `faa` and `plv` are computed by the caller from the real left/right channel
+// pair (see processBluetoothEEG) — this used to be `Math.random()`, which made
+// Swara AND every guna/vṛtti figure derived from it meaningless noise.
+function classifyLocal(bp, faa, plv) {
   const states = ['Kshipta','Vikshipta','Ekagra','Niruddha'];
   const logits = [
     bp.beta*3.0 + bp.gamma*1.5 - bp.alpha*1.5,
@@ -1097,18 +1171,27 @@ function classifyLocal(bp) {
   const probMap = {};
   states.forEach((s,i) => { probMap[s] = (probs[i]*100).toFixed(1)+'%'; });
 
-  const asym = (Math.random()-0.5) * 0.3;
-  const isIda = asym < -0.04, isPingala = asym > 0.04;
+  // Same FAA thresholds as the .NET analyser's VedanticAnalyzer (±0.15).
+  const isIda = faa < -0.15, isPingala = faa > 0.15;
+  const swaraNadi = isIda ? 'ida' : isPingala ? 'pingala' : 'sushumna';
   const swaraState = isIda ? 'Ida Nadi — right hemisphere dominant'
     : isPingala ? 'Pingala Nadi — left hemisphere dominant'
     : 'Sushumna — both nadis balanced';
   const swaraNote = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
 
   const tattva = [];
-  if (bp.alpha>0.35 && bp.theta<0.25) tattva.push('Pratyahara Window');
-  if (bp.theta>0.28 && bp.alpha>0.28) tattva.push('Potential Tattva Activation');
-  if (bp.theta>0.32 && bp.delta>0.12) tattva.push('Turiya Approach');
-  if (bp.gamma>0.12) tattva.push('Gamma Spike');
+  if (bp.gamma > 0.12) tattva.push('Gamma Spike');
+  if (bp.theta > 0.25 && bp.high_beta < 0.10) tattva.push('Pratyahara Window');
+  if (bp.delta > 0.35 && bp.alpha > 0.15) tattva.push('Turiya Approach');
+  if (plv > 0.80 && Math.abs(faa) < 0.10) tattva.push('Sushumna Activated');
+  if (bp.high_beta > 0.30) tattva.push('High-Beta Agitation');
+  if (bp.delta > 0.40 && bp.alpha < 0.10) tattva.push('Tamasic State');
+
+  const gunas = classifyGunasLocal(bp, faa, plv, swaraNadi);
+  // Same formula as VedanticAnalyzer.VrittiIndex.
+  const vritti = Math.max(0, Math.min(1, 1.6*bp.high_beta + 0.35*(1-plv) - 0.15));
+  const nirodhaState = vritti < 0.20 ? 'Nirodha (still)' : vritti < 0.45 ? 'Settling'
+    : vritti < 0.70 ? 'Active' : 'Vikshepa (scattered)';
 
   epoch++;
   const depth = CHITTA_DEPTHS[state];
@@ -1116,12 +1199,15 @@ function classifyLocal(bp) {
     epoch, latency_ms: 20 + Math.random()*10,
     data_quality: '✓ local FFT',
     chitta_bhumi: { state, depth, confidence: probMap[state], probabilities: probMap },
-    swara: { state: swaraState, confidence: Math.abs(asym)>0.12 ? 'High' : 'Moderate', note: swaraNote },
+    swara: { state: swaraState, confidence: Math.abs(faa)>0.40 ? 'High' : Math.abs(faa)>0.20 ? 'Moderate' : 'Low', note: swaraNote },
     band_powers: { relative: bp },
     eeg_spectrum: bp,
-    alpha_asymmetry: asym,
+    alpha_asymmetry: faa,
     tattva_flags: tattva,
     contemplative_depth: depth,
+    gunas,
+    vritti_index: vritti,
+    nirodha_state: nirodhaState,
   };
 }
 
@@ -1599,13 +1685,39 @@ async function processBluetoothEEG() {
     }
   }
 
-  // Local FFT fallback
-  const signal = snapshot[0] || [];
-  if (signal.length < 64) return;
-  const sz = Math.pow(2, Math.floor(Math.log2(signal.length)));
-  const mags = fft(signal.slice(-sz));
-  const bp = bandPowers(mags, activeSampleRate, sz);
-  const r = classifyLocal(bp);
+  // Local FFT fallback — per-channel bands so FAA/PLV/Gunas aren't guesswork.
+  // Previously only channel 0 was used and FAA was `Math.random()`, which made
+  // Swara and every guna/vṛtti figure derived from it meaningless noise.
+  const chBp = [];
+  for (let c = 0; c < snapshot.length; c++) {
+    const sig = snapshot[c] || [];
+    if (sig.length < 64) continue;
+    const sz = Math.pow(2, Math.floor(Math.log2(sig.length)));
+    chBp.push({ ch: c, bp: bandPowers(fft(sig.slice(-sz)), activeSampleRate, sz) });
+  }
+  if (!chBp.length) return;
+
+  // Whole-head average band powers (same convention as the .NET analyser).
+  const bp = {};
+  for (const k of ['delta','theta','alpha','low_beta','high_beta','beta','gamma']) {
+    bp[k] = chBp.reduce((s, x) => s + x.bp[k], 0) / chBp.length;
+  }
+
+  // Left = channels 0,1 (TP9,AF7); Right = channels 2,3 (AF8,TP10) — same
+  // hemisphere assignment as the analyser's FeatureExtractor default indices.
+  const leftCh = chBp.filter(x => x.ch < 2), rightCh = chBp.filter(x => x.ch >= 2);
+  const leftAlpha = leftCh.length ? leftCh.reduce((s,x) => s+x.bp.alpha, 0) / leftCh.length : bp.alpha;
+  const rightAlpha = rightCh.length ? rightCh.reduce((s,x) => s+x.bp.alpha, 0) / rightCh.length : bp.alpha;
+  const faa = Math.max(-2, Math.min(2, Math.log(rightAlpha + 1e-9) - Math.log(leftAlpha + 1e-9)));
+
+  // PLV proxy: |correlation| between a left- and a right-hemisphere channel's raw
+  // signal — not a true Hilbert-phase PLV (that always comes from the analyser),
+  // but a reasonable coherence stand-in for this degraded fallback path.
+  const plv = snapshot.length >= 3
+    ? Math.max(0, Math.min(1, Math.abs(pearsonCorr(snapshot[0], snapshot[2]))))
+    : 0.5;
+
+  const r = classifyLocal(bp, faa, plv);
   r.latency_ms = parseFloat((performance.now() - t0).toFixed(1));
   applyReading(smoothReading(r));
   storeEpochToSession(r);
@@ -1933,11 +2045,50 @@ function renderCorroboration(r) {
     ${caveat}`;
 }
 
-function setTextureBar(key, pct) {
-  const bar = $('bar-' + key);
-  const val = $('val-' + key);
+function setTextureBar(key, pct, prefix) {
+  const p = prefix || '';
+  const bar = $(p + 'bar-' + key);
+  const val = $(p + 'val-' + key);
   if (bar) bar.style.width = (pct != null ? Math.round(pct) : 0) + '%';
   if (val) val.textContent = pct != null ? Math.round(pct) + '%' : '—';
+}
+
+// Session-level Inner Texture — same derivation as renderInnerTexture, but
+// driven by the /analytics summary's session averages (an-* ids) rather than
+// a single live epoch. Previously the Analyze view had no Inner Texture card
+// at all, so this was permanently blank regardless of what the analyser sent.
+function renderAnalyzeTexture(s) {
+  setTextureBar('vritti', s.avgVritti != null ? s.avgVritti * 100 : null, 'an-');
+  const nir = $('an-nirodha-state');
+  if (nir) nir.textContent = s.avgVritti != null ? nirodhaLabel(s.avgVritti) : '—';
+
+  const cx = s.avgComplexity;
+  let richness = null;
+  if (cx) {
+    const parts = [
+      clamp01(cx.lziv),
+      clamp01(cx.permEntropy),
+      clamp01(cx.sampleEntropy / 1.5),
+      clamp01((cx.higuchiFd - 1) / 1),
+    ];
+    richness = parts.reduce((a, b) => a + b, 0) / parts.length;
+  }
+  setTextureBar('richness', richness != null ? richness * 100 : null, 'an-');
+
+  const ap = s.avgAperiodic;
+  const stillness = (ap && ap.exponent != null) ? clamp01((ap.exponent - 1.0) / (3.5 - 1.0)) : null;
+  setTextureBar('stillness', stillness != null ? stillness * 100 : null, 'an-');
+}
+
+// Session-level Tattva/Chakra Correlates — frequency of each flag across all
+// epochs. Previously the Analyze view had no card and /analytics never
+// aggregated tattva_flags, so this was permanently blank/absent.
+function renderAnalyzeTattva(flags) {
+  const el = $('an-tattva-flags');
+  if (!el) return;
+  el.innerHTML = (flags && flags.length)
+    ? flags.map(f => `<span class="tattva-tag">${escHtml(f.flag)} <em>(${f.count})</em></span>`).join('')
+    : '<span class="tattva-tag muted">None detected</span>';
 }
 
 function clamp01(x) { return (x == null || isNaN(x)) ? 0 : Math.max(0, Math.min(1, x)); }
@@ -2450,6 +2601,8 @@ async function loadAnalyzeSession(id) {
     drawSwaraGauge(s.swaraCounts || {});
     drawDepthMeter(eps, s);
     drawSensorSchematic(s.avgBands || {});
+    renderAnalyzeTexture(s);
+    renderAnalyzeTattva(s.tattvaFlags || []);
   } catch (err) {
     anSetEmpty('Could not load analytics: ' + err.message);
   }
