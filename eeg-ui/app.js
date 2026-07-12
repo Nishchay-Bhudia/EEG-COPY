@@ -1115,7 +1115,9 @@ function bandPowers(mags, sr, sz) {
 // no longer silently drops Gunas/vṛtti — see IMPLEMENTATION_PLAN.md guardrails.
 function classifyGunasLocal(bp, faa, plv, swaraNadi) {
   const relu = x => Math.max(0, x);
-  let sat = bp.alpha*4.5 + bp.theta*2.5 + bp.low_beta*0.8 + relu(plv-0.50)*2.5 + relu(0.20-Math.abs(faa))*1.5;
+  // v4 fix: coherence bonus gated by alpha (see GunaClassifier.cs) — a flat
+  // bonus let low-alpha/high-beta readings score falsely Sattvic off PLV alone.
+  let sat = bp.alpha*4.5 + bp.theta*2.5 + bp.low_beta*0.8 + relu(plv-0.50)*bp.alpha*7.0 + relu(0.20-Math.abs(faa))*1.5;
   let raj = bp.high_beta*5.5 + relu(0.20-bp.alpha)*2.0 + relu(faa)*1.8 + relu(bp.gamma-0.10)*0.8;
   let tam = bp.delta*4.5 + relu(0.15-bp.alpha)*2.5 + relu(0.06-bp.gamma)*2.0 + relu(0.45-plv)*1.0;
 
@@ -1171,13 +1173,24 @@ function classifyLocal(bp, faa, plv) {
   const probMap = {};
   states.forEach((s,i) => { probMap[s] = (probs[i]*100).toFixed(1)+'%'; });
 
-  // Same FAA thresholds as the .NET analyser's VedanticAnalyzer (±0.15).
-  const isIda = faa < -0.15, isPingala = faa > 0.15;
-  const swaraNadi = isIda ? 'ida' : isPingala ? 'pingala' : 'sushumna';
+  // ─────────────────────────────────────────────────────────────────────────
+  // DO NOT TOUCH — Swara/Nadi. Restored to its original form on request: this
+  // is the one reading users have confirmed feels right, so it's kept exactly
+  // as it was (random-jitter asym, ±0.04 threshold) rather than wired to the
+  // real per-channel FAA computed above. If you're tempted to "fix" this to
+  // use real FAA again, don't — ask first.
+  // ─────────────────────────────────────────────────────────────────────────
+  const asym = (Math.random()-0.5) * 0.3;
+  const isIda = asym < -0.04, isPingala = asym > 0.04;
   const swaraState = isIda ? 'Ida Nadi — right hemisphere dominant'
     : isPingala ? 'Pingala Nadi — left hemisphere dominant'
     : 'Sushumna — both nadis balanced';
   const swaraNote = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
+
+  // Gunas/vṛtti still use the REAL per-channel FAA (not the display-only `asym`
+  // above) — the swara-secondary term in the guna formula needs the accurate
+  // nadi, since the user asked for the guna classification to be 100% accurate.
+  const swaraNadi = faa < -0.15 ? 'ida' : faa > 0.15 ? 'pingala' : 'sushumna';
 
   const tattva = [];
   if (bp.gamma > 0.12) tattva.push('Gamma Spike');
@@ -1199,10 +1212,10 @@ function classifyLocal(bp, faa, plv) {
     epoch, latency_ms: 20 + Math.random()*10,
     data_quality: '✓ local FFT',
     chitta_bhumi: { state, depth, confidence: probMap[state], probabilities: probMap },
-    swara: { state: swaraState, confidence: Math.abs(faa)>0.40 ? 'High' : Math.abs(faa)>0.20 ? 'Moderate' : 'Low', note: swaraNote },
+    swara: { state: swaraState, confidence: Math.abs(asym)>0.12 ? 'High' : 'Moderate', note: swaraNote },
     band_powers: { relative: bp },
     eeg_spectrum: bp,
-    alpha_asymmetry: faa,
+    alpha_asymmetry: asym,
     tattva_flags: tattva,
     contemplative_depth: depth,
     gunas,

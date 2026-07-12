@@ -86,11 +86,20 @@ def classify_gunas(
     # Tertiary: SMR / Low Beta = calm-focused state (slightly Sattvic).
     # Bonus: balanced FAA (|FAA| < 0.15) = Sushumna = Sattva.
     # Bonus: high PLV = interhemispheric coherence = Sattva/Niruddha.
+    # v4 fix: the coherence bonus used to be a flat `(plv-0.50)*2.5` regardless
+    # of alpha power, so a low-alpha/high-beta (rajasic-looking) reading with a
+    # spuriously high PLV could score ~half its Sattva total from coherence
+    # alone — confirmed empirically (alpha=0.08, high_beta=0.25, plv=0.90 read
+    # as "Sattvic-predominant"). PLV here is measured specifically in the alpha
+    # band (FeatureExtractor.ComputePlv), so "coherent" only means something
+    # Sattva-relevant when there's meaningful alpha power to BE coherent in —
+    # the bonus is now gated by alpha itself, rescaled to match the old bonus's
+    # magnitude at a typical Sattvic alpha (~0.38).
     sat = (
         alpha    * 4.5 +                           # Alpha = primary Sattva driver
         theta    * 2.5 +                           # Frontal Midline Theta
         low_beta * 0.8 +                           # SMR/calm-focus (mild Sattva)
-        max(0.0, plv - 0.50) * 2.5 +              # Coherence bonus (peaks at PLV=1)
+        max(0.0, plv - 0.50) * alpha * 7.0 +      # Coherent ALPHA bonus (needs alpha present)
         max(0.0, 0.20 - abs(faa)) * 1.5           # FAA balance bonus (max at FAA=0)
     )
 

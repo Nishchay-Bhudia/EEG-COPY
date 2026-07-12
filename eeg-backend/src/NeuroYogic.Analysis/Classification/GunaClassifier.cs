@@ -30,11 +30,18 @@ public sealed class GunaClassifier : IGunaClassifier
         var highBeta = br.HighBeta;
 
         // ── SATTVA ──
+        // v4 fix: the coherence bonus used to be flat (plv-0.50)*2.5 regardless
+        // of alpha power, so a low-alpha/high-beta reading with a spuriously
+        // high PLV could score ~half its Sattva total from coherence alone —
+        // confirmed empirically. PLV is measured in the alpha band specifically
+        // (FeatureExtractor.ComputePlv), so the bonus is now gated by alpha
+        // itself, rescaled to match the old bonus's magnitude at a typical
+        // Sattvic alpha (~0.38).
         var sat =
             alpha * 4.5 +
             theta * 2.5 +
             lowBeta * 0.8 +
-            Relu(plv - 0.50) * 2.5 +
+            Relu(plv - 0.50) * alpha * 7.0 +
             Relu(0.20 - Math.Abs(faa)) * 1.5;
 
         // ── RAJAS ──

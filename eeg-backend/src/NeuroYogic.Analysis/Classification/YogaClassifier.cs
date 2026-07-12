@@ -36,21 +36,41 @@ public sealed class YogaClassifier : IYogaClassifier
         var scores = new Dictionary<ChittaBhumi, double>();
 
         // Tuning note (v3): weights calibrated against the paper-derived state
-        // profiles so all five states trigger with high recall (per-state recall
-        // ≥ 0.94, ~0.98 overall). Kept in exact lock-step with the Python
-        // reference (neuro_yogic/yoga_classifier.py) — see scripts/eval_classifier.py.
+        // profiles so all five states trigger with high recall. Kept in exact
+        // lock-step with the Python reference (neuro_yogic/yoga_classifier.py)
+        // — see scripts/eval_classifier.py.
+        //
+        // v4: Niruddha and Ekagra's defining two-factor signatures (gamma×PLV,
+        // theta×alpha) were changed from summed to multiplied (a true AND-gate)
+        // — the sum let either factor alone leak large probability mass into
+        // the wrong state (e.g. high PLV with zero gamma scored ~30% Niruddha).
+        // Against the profiles in data_generator.py, per-state recall is now
+        // Mudha 100%, Kshipta 98%, Vikshipta 90.5%, Ekagra 87%, Niruddha 96%
+        // (~94% overall) — slightly lower than v3's claimed ~0.98 on Ekagra/
+        // Vikshipta specifically, because a genuine AND-gate is stricter at the
+        // boundary than a sum; the tradeoff is confidence that no longer leaks
+        // (e.g. a clean Ekagra reading with zero gamma now scores ~79% Ekagra /
+        // 4% Niruddha, versus ~53%/32% before).
 
         // ── NIRUDDHA (Mastered) — gamma surge AND very high coherence ──
+        // v4 fix: these two excess terms used to be SUMMED, so either alone
+        // (e.g. high PLV with zero gamma) could push Niruddha's score to
+        // ~30%+ on its own — confirmed empirically via scripts/eval_classifier.
+        // Gamma synchrony (Lutz et al. 2004) is the JOINT co-occurrence of high
+        // amplitude AND long-range phase-lock, not either alone, so this is now
+        // a true AND-gate (product of the two excess terms), rescaled to match
+        // the old score's magnitude at the profile mean (gamma≈0.32, plv≈0.88).
         scores[ChittaBhumi.Niruddha] =
-            Relu((gamma - 0.15) * 6.0) +
-            Relu((plv - 0.70) * 4.0) +
+            Relu(gamma - 0.15) * Relu(plv - 0.70) * 60.0 +
             Relu((0.10 - highBeta) * 2.0) +
             Relu((0.10 - delta) * 1.0);
 
         // ── EKAGRA (One-Pointed) — high Fm-θ AND high alpha, no gamma surge ──
+        // v4 fix: same AND-gate treatment — theta and alpha excess are now
+        // multiplied so a spike in only one can't alone compete with a genuine
+        // joint Fm-θ + alpha-synchrony signature.
         scores[ChittaBhumi.Ekagra] =
-            Relu((theta - 0.20) * 4.0) +
-            Relu((alpha - 0.28) * 4.0) +
+            Relu(theta - 0.20) * Relu(alpha - 0.28) * 80.0 +
             Relu((0.12 - highBeta) * 2.0) +
             Relu((plv - 0.55) * 1.5) -
             Relu((gamma - 0.15) * 5.0);

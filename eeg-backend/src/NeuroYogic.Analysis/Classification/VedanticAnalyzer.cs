@@ -278,6 +278,9 @@ public sealed class VedanticAnalyzer : IVedanticAnalyzer
     private static string Fmt2(double v) =>
         Math.Round(v, 2, MidpointRounding.ToEven).ToString("0.00", CultureInfo.InvariantCulture);
 
+    // DO NOT TOUCH — Swara/Nadi. Confirmed by real-world testing to be the one
+    // reading that's actually accurate. Leave the thresholds and logic below
+    // exactly as they are, including during any Chitta Bhumi / Guna rework.
     private static SwaraReading ClassifySwara(double faa)
     {
         var score = faa;

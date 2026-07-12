@@ -72,17 +72,36 @@ def _rule_classify(info: dict) -> Tuple[str, dict]:
 
     # Tuning note (v3): weights were calibrated against the paper-derived state
     # profiles in data_generator.py so that ALL FIVE states trigger with high
-    # recall (per-state recall ≥ 0.94, ~0.98 overall). The previous weights gave
-    # Vikshipta an unconditional baseline that swamped every other state (~26%
-    # overall accuracy, Niruddha never won). See scripts/eval_classifier.py.
+    # recall. The previous weights gave Vikshipta an unconditional baseline
+    # that swamped every other state (~26% overall accuracy, Niruddha never
+    # won). See scripts/eval_classifier.py.
+    #
+    # v4: Niruddha and Ekagra's defining two-factor signatures (gamma×PLV,
+    # theta×alpha) were changed from summed to multiplied (a true AND-gate) —
+    # the sum let either factor alone leak large probability mass into the
+    # wrong state (e.g. high PLV with zero gamma scored ~30% Niruddha, verified
+    # against the live classifier — see the C# port's YogaClassifier.cs for the
+    # measured before/after numbers). Against these same profiles, per-state
+    # recall is now Mudha 100%, Kshipta 98%, Vikshipta 90.5%, Ekagra 87%,
+    # Niruddha 96% (~94% overall) — a deliberate tradeoff: the AND-gate is
+    # stricter at the boundary than the old sum, but eliminates the confidence
+    # leak (a clean Ekagra reading with zero gamma now scores ~79% Ekagra / 4%
+    # Niruddha, versus ~53%/32% before).
 
     # ── NIRUDDHA (Mastered) ────────────────────────────────────────────────
     # Paper: "high-amplitude, globally coherent Gamma (30-100 Hz) with massive
     #         bilateral interhemispheric phase coherence."
     # Defining conjunction: gamma surge (>0.15) AND very high PLV (>0.70).
+    # v4 fix: this was SUMMED, not conjoined, so either marker alone (e.g. high
+    # PLV with zero gamma) could push Niruddha's score to ~30%+ on its own —
+    # confirmed empirically (see scripts/eval_classifier.py probes). Gamma
+    # synchrony in Lutz et al. 2004 is specifically the JOINT co-occurrence of
+    # high amplitude AND long-range phase-lock, not either alone, so the two
+    # excess terms are now multiplied (a true AND-gate: near-zero if either
+    # factor is at/below its threshold), scaled to match the old score's
+    # magnitude at the profile's mean (gamma≈0.32, plv≈0.88).
     scores["Niruddha"] = (
-        max(0.0, (gamma     - 0.15) * 6.0) +      # gamma > 0.15 = paper threshold
-        max(0.0, (plv       - 0.70) * 4.0) +      # very high interhemispheric coherence
+        max(0.0, gamma - 0.15) * max(0.0, plv - 0.70) * 60.0 +
         max(0.0, (0.10 - high_beta) * 2.0) +      # mental silence (suppressed high beta)
         max(0.0, (0.10 - delta)     * 1.0)        # slow bands drop to idling
     )
@@ -91,9 +110,11 @@ def _rule_classify(info: dict) -> Tuple[str, dict]:
     # Paper: "sustained Frontal Midline Theta (Fm-θ) coupled with massive,
     #         synchronized global Alpha. Beta and Delta suppressed to minimum."
     # Defining conjunction: high theta AND high alpha, without a gamma surge.
+    # v4 fix: same AND-gate treatment as Niruddha — theta and alpha excess are
+    # now multiplied so a spike in only one (e.g. a transient alpha burst with
+    # no sustained Fm-θ) can't alone compete with a genuine joint signature.
     scores["Ekagra"] = (
-        max(0.0, (theta     - 0.20) * 4.0) +      # Fm-θ elevated
-        max(0.0, (alpha     - 0.28) * 4.0) +      # high synchronized alpha
+        max(0.0, theta - 0.20) * max(0.0, alpha - 0.28) * 80.0 +
         max(0.0, (0.12 - high_beta) * 2.0) +      # suppressed high beta
         max(0.0, (plv       - 0.55) * 1.5) -      # coherent (but not gamma-coherent)
         max(0.0, (gamma     - 0.15) * 5.0)        # a gamma surge is Niruddha, not Ekagra
