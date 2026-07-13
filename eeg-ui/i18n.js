@@ -83,6 +83,7 @@ const I18N = {
     metricBoard: 'BOARD',
     metricStatus: 'STATUS',
     awaitingSignal: 'awaiting signal',
+    lastKnownReading: 'last known reading',
     disconnected: 'disconnected',
 
     // ── Chitta Bhumi card ──
@@ -470,6 +471,7 @@ const I18N = {
     metricBoard: 'બોર્ડ',
     metricStatus: 'સ્થિતિ',
     awaitingSignal: 'સિગ્નલની રાહ જોઈ રહ્યાં છીએ',
+    lastKnownReading: 'છેલ્લું જાણીતું રીડિંગ',
     disconnected: 'ડિસ્કનેક્ટ થયેલ',
 
     chittaBhumiTitle: 'ચિત્ત ભૂમિ',

@@ -1898,15 +1898,29 @@ function onBtDisconnected() {
 // about what a noisy signal actually supports.
 let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
 let lastValidHrAt = 0, lastValidSpo2At = 0;
-const PPG_RECOMPUTE_MS = 1000; // real HR doesn't need updating faster than 1/s
-// If the signal hasn't produced a single valid reading in this long, the old
-// EMA no longer means anything (e.g. good contact at the start of a session,
-// then the band shifts) — stop showing it as if it were still live. Matches
-// the analysis window itself: if 8s of fresh data can't confirm a reading,
-// there's no basis to keep displaying an older one.
+// A single bad window (motion, brief poor contact) shouldn't be able to yank
+// the displayed number by itself — hold it as a "candidate" and only fold it
+// into the EMA once the *next* window agrees with it too. A genuine change
+// (HR actually rising/falling) is sustained across consecutive ~1s windows
+// and gets confirmed almost immediately; a one-off artifact isn't and gets
+// silently dropped instead of ever reaching the screen.
+let pendingHrCandidate = null;
+const HR_JUMP_BPM = 20;         // single-window change bigger than this needs confirmation
+const HR_JUMP_CONFIRM_TOL = 10; // how close the next window must land to confirm it
+const PPG_RECOMPUTE_MS = 1000;  // real HR doesn't need updating faster than 1/s
+// If nothing's been confirmed in this long, the number on screen is no
+// longer "live" — but per explicit feedback, don't blank it out either
+// (that read as flicker); keep showing the last known value and just change
+// the status label so it's honest about being a last-known reading, not a
+// fresh one.
 const PPG_STALE_MS = 8000;
 
-function resetPpgSmoothing() { hrEma = null; spo2Ema = null; lastPpgComputeAt = 0; lastValidHrAt = 0; lastValidSpo2At = 0; }
+function resetPpgSmoothing() {
+  hrEma = null; spo2Ema = null; lastPpgComputeAt = 0;
+  lastValidHrAt = 0; lastValidSpo2At = 0; pendingHrCandidate = null;
+}
+function isHrStale()   { return hrEma == null   || performance.now() - lastValidHrAt   > PPG_STALE_MS; }
+function isSpo2Stale() { return spo2Ema == null || performance.now() - lastValidSpo2At > PPG_STALE_MS; }
 
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
@@ -1922,10 +1936,20 @@ function onMusePPG(ev, channel) {
     lastPpgComputeAt = now;
     const rawHr = computeHeartRate(ppgBuf.ir);
     if (rawHr != null) {
-      hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
-      lastValidHrAt = now;
-    } else if (hrEma != null && now - lastValidHrAt > PPG_STALE_MS) {
-      hrEma = null;
+      if (hrEma == null || Math.abs(rawHr - hrEma) <= HR_JUMP_BPM) {
+        hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+        lastValidHrAt = now;
+        pendingHrCandidate = null;
+      } else if (pendingHrCandidate != null && Math.abs(rawHr - pendingHrCandidate) <= HR_JUMP_CONFIRM_TOL) {
+        // Two consecutive windows agree on the jump — treat it as real.
+        hrEma = hrEma + 0.3 * (rawHr - hrEma);
+        lastValidHrAt = now;
+        pendingHrCandidate = null;
+      } else {
+        pendingHrCandidate = rawHr; // hold — see if the next window confirms it
+      }
+    } else {
+      pendingHrCandidate = null;
     }
     latestHeartRate = hrEma;
 
@@ -1934,16 +1958,14 @@ function onMusePPG(ev, channel) {
       if (rawSpo2 != null) {
         spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
         lastValidSpo2At = now;
-      } else if (spo2Ema != null && now - lastValidSpo2At > PPG_STALE_MS) {
-        spo2Ema = null;
       }
       latestSpO2 = spo2Ema;
     }
 
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl)  { hrEl.textContent  = latestHeartRate != null ? localizeNumber(latestHeartRate.toFixed(0)) : '—'; if (hrSt)  hrSt.textContent  = latestHeartRate != null ? t('liveReading') : t('awaitingSignal'); }
-    if (spo2El){ spo2El.textContent = latestSpO2 != null      ? localizeNumber(latestSpO2.toFixed(1))      : '—'; if (spo2St) spo2St.textContent = latestSpO2 != null      ? t('liveReading') : t('awaitingSignal'); }
+    if (hrEl)  { hrEl.textContent  = latestHeartRate != null ? localizeNumber(latestHeartRate.toFixed(0)) : '—'; if (hrSt)  hrSt.textContent  = latestHeartRate == null ? t('awaitingSignal') : (isHrStale()   ? t('lastKnownReading') : t('liveReading')); }
+    if (spo2El){ spo2El.textContent = latestSpO2 != null      ? localizeNumber(latestSpO2.toFixed(1))      : '—'; if (spo2St) spo2St.textContent = latestSpO2 == null      ? t('awaitingSignal') : (isSpo2Stale() ? t('lastKnownReading') : t('liveReading')); }
   }
 }
 
@@ -2655,10 +2677,17 @@ function applyReading(r) {
   const hrEl = $('val-hr');
   const spo2StatusEl = $('spo2-status');
   const hrStatusEl = $('hr-status');
+  // In live Bluetooth mode, blood_oxygen/heart_rate reflect the same
+  // hrEma/spo2Ema tracked in onMusePPG — use its staleness state so a
+  // momentary bad window doesn't blank the card (per explicit feedback),
+  // just marks the number as "last known" rather than live. Demo/backend-URL
+  // /replay modes don't populate that PPG-specific state, so they keep the
+  // simpler null-check ("no reading yet" vs "have one").
+  const hrIsBleTracked = mode === 'bluetooth';
   if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
   if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
-  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? t('liveReading') : t('awaitingSignal');
-  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? t('liveReading') : t('awaitingSignal');
+  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen == null ? t('awaitingSignal') : (hrIsBleTracked && isSpo2Stale() ? t('lastKnownReading') : t('liveReading'));
+  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate == null ? t('awaitingSignal') : (hrIsBleTracked && isHrStale() ? t('lastKnownReading') : t('liveReading'));
 
   localizeDom(document.querySelector('.dashboard-grid'));
 }
