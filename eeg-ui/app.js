@@ -32,6 +32,69 @@ function onLanguageChanged() {
   if (typeof backendUrl !== 'undefined' && backendUrl && typeof pingBackendStatus === 'function') {
     pingBackendStatus(backendUrl);
   }
+  // User-menu role label is set once in enterApp(), outside any per-view render.
+  if (typeof currentUser !== 'undefined' && currentUser && typeof translateRole === 'function') {
+    const roleEl = document.getElementById('user-menu-role');
+    if (roleEl) roleEl.textContent = translateRole(currentUser.role);
+  }
+  // Command-bar client picker and the sidebar session history are also
+  // populated once in enterApp(), outside any per-view render — refresh both
+  // (cheap idempotent GETs, no interactive state to lose) so they don't go
+  // stale after the first language switch.
+  if (typeof currentUser !== 'undefined' && currentUser) {
+    if (typeof loadClientOptions === 'function') loadClientOptions();
+    if (typeof loadSessionHistory === 'function') loadSessionHistory();
+  }
+  // Demo toggle button's label is set imperatively on click (mode === 'demo'),
+  // not re-derived from state on every render — resync it here too.
+  if (typeof mode !== 'undefined') {
+    const demoBtn = document.getElementById('btn-demo');
+    if (demoBtn) demoBtn.textContent = mode === 'demo' ? t('stopDemoLabel') : t('demoLabel');
+  }
+  // Views other than the dashboard bake translated text straight into
+  // innerHTML at render time, so switching language only takes effect there
+  // once they're re-rendered. Re-run whichever view is currently on screen —
+  // cheap idempotent GETs for the list-style views, and a same-data redraw
+  // (no re-fetch, no lost scrub position) for Replay/Analyze.
+  switch (typeof currentView !== 'undefined' ? currentView : null) {
+    case 'home':    if (typeof onShowHome === 'function') onShowHome(); break;
+    case 'cohort':  if (typeof onShowCohort === 'function') onShowCohort(); break;
+    case 'client':  if (typeof onShowClient === 'function') onShowClient(); break;
+    case 'admin':   if (typeof openAdminTab === 'function') openAdminTab(adminCurrentTab); break;
+    case 'replay':
+      if (typeof replayEpochs !== 'undefined' && replayEpochs.length && typeof updateReplayDisplay === 'function') {
+        // Render order matters: updateReplayDisplay() ends with the localizeDom
+        // sweep for the whole .replay-view, so anything digit-bearing must be
+        // (re)written before it runs, or its numerals are left un-swept.
+        if (typeof renderReplayMetrics === 'function') renderReplayMetrics(lastReplaySummary || {});
+        if (typeof renderReplayViewMeta === 'function') renderReplayViewMeta(lastReplaySummary);
+        if (typeof renderReplayScrubber === 'function') renderReplayScrubber(lastReplayPhases, lastReplaySummary?.durationSeconds || 0);
+        updateReplayDisplay(replayIndex);
+      } else if (typeof onShowReplay === 'function') {
+        // No session loaded — nothing to lose, safe to re-run in full so the
+        // "No sessions" empty state (and picker options) pick up the new language.
+        onShowReplay();
+      }
+      if (typeof replayPlaying !== 'undefined') {
+        const ppBtn = document.getElementById('replay-play-pause');
+        if (ppBtn) ppBtn.textContent = replayPlaying ? t('pauseLabel') : t('playLabel');
+      }
+      break;
+    case 'analyze':
+      if (typeof analyzeSessionId !== 'undefined' && analyzeSessionId && typeof loadAnalyzeSession === 'function') {
+        loadAnalyzeSession(analyzeSessionId);
+      }
+      break;
+  }
+  // AI Baba is a modal, not a nav view — re-fetch its session picker if that's
+  // the step showing (safe: no selection made yet, nothing to lose). Leave an
+  // in-progress chat alone rather than wiping the conversation.
+  const aiOverlay = document.getElementById('ai-baba-overlay');
+  const aiPickStep = document.getElementById('ai-baba-step-pick');
+  if (aiOverlay && aiOverlay.style.display !== 'none' && aiPickStep && aiPickStep.style.display !== 'none'
+      && typeof openAiBaba === 'function') {
+    openAiBaba();
+  }
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -142,6 +205,8 @@ let replaySpeed = 1;                 // playback multiplier (0.5×–4×)
 let replaySessionId = null;          // session shown in the Replay view
 let pendingReplaySessionId = null;   // deep-link target from the analytics overlay
 let currentAnalyticsSessionId = null;
+let lastReplaySummary = null;        // last /analytics summary, for re-translating the metrics strip in place
+let lastReplayPhases = [];           // last /analytics phases, for re-translating the scrubber tooltips in place
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -186,7 +251,7 @@ async function api(method, path, body) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch('/api' + path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed'), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data.error || t('requestFailed')), { status: res.status });
   return data;
 }
 
@@ -266,7 +331,7 @@ function enterApp() {
 
   $('user-avatar-initial').textContent = (currentUser.username[0] || '?').toUpperCase();
   $('user-display-name').textContent = currentUser.username;
-  $('user-menu-role').textContent = currentUser.role;
+  $('user-menu-role').textContent = translateRole(currentUser.role);
 
   const elevated = isElevatedRole();
   $('btn-open-admin').style.display = elevated ? '' : 'none';
@@ -296,7 +361,7 @@ async function loadClientOptions() {
   try {
     const clients = await api('GET', '/clients');
     const current = sel.value;
-    sel.innerHTML = '<option value="">No client</option>' +
+    sel.innerHTML = `<option value="">${escHtml(t('noClient'))}</option>` +
       clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
     sel.value = current; // preserve selection across refreshes
   } catch (_) { /* leave the default "No client" option */ }
@@ -330,17 +395,17 @@ $('btn-login').addEventListener('click', async () => {
   const errEl = $('login-error');
   errEl.style.display = 'none';
   $('btn-login').disabled = true;
-  $('btn-login').textContent = 'Signing in…';
+  $('btn-login').textContent = t('signingIn');
 
   try {
     currentUser = await api('POST', '/auth/login', { username, password });
     enterApp();
   } catch (err) {
-    errEl.textContent = err.message || 'Login failed';
+    errEl.textContent = err.message || t('loginFailed');
     errEl.style.display = '';
   } finally {
     $('btn-login').disabled = false;
-    $('btn-login').textContent = 'Sign In';
+    $('btn-login').textContent = t('signIn');
   }
 });
 
@@ -383,24 +448,24 @@ $('settings-overlay').addEventListener('click', e => {
 $('btn-test').addEventListener('click', async () => {
   const url = $('input-backend-url').value.trim().replace(/\/$/, '');
   const testEl = $('test-msg');
-  if (!url) { alert('Enter a URL first.'); return; }
+  if (!url) { alert(t('alertEnterUrl')); return; }
   testEl.style.display = '';
   testEl.style.color = 'var(--text-muted)';
-  testEl.textContent = 'Testing…';
+  testEl.textContent = t('testingEllipsis');
   try {
     const res = await fetch(url + '/status', { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
     testEl.style.color = '#56A67A';
-    testEl.textContent = '✓ Connected — board: ' + (data.board || 'web-bluetooth') + (data.model_ready ? ' | model ready' : ' | model loading…');
+    testEl.textContent = t('connectedBoardPrefix') + (data.board || 'web-bluetooth') + (data.model_ready ? t('modelReadySuffix') : t('modelLoadingSuffix'));
   } catch (e) {
     testEl.style.color = '#C75C5C';
-    testEl.textContent = '✗ ' + (e.message || 'connection failed');
+    testEl.textContent = '✗ ' + (e.message || t('connectionFailed'));
   }
 });
 
 $('btn-save').addEventListener('click', () => {
   const url = $('input-backend-url').value.trim().replace(/\/$/, '');
-  if (!url) { alert('Enter a URL first.'); return; }
+  if (!url) { alert(t('alertEnterUrl')); return; }
   backendUrl = url;
   localStorage.setItem('controlhub_url', url);
   $('settings-overlay').classList.remove('open');
@@ -446,7 +511,7 @@ $('btn-create-user').addEventListener('click', async () => {
   errEl.style.display = 'none';
 
   if (!username || !password) {
-    errEl.textContent = 'Username and password required.';
+    errEl.textContent = t('usernamePasswordRequired');
     errEl.style.display = '';
     return;
   }
@@ -469,26 +534,26 @@ $('btn-cancel-reset-pw').addEventListener('click', () => {
 $('btn-save-reset-pw').addEventListener('click', async () => {
   if (!resetPwTargetUserId) return;
   const pw = $('reset-pw-input').value;
-  if (!pw) { alert('Enter a password.'); return; }
+  if (!pw) { alert(t('alertEnterPassword')); return; }
   try {
     await api('PUT', '/users/' + resetPwTargetUserId + '/password', { password: pw });
     $('reset-pw-form').style.display = 'none';
     resetPwTargetUserId = null;
     $('reset-pw-input').value = '';
-    alert('Password updated.');
+    alert(t('alertPasswordUpdated'));
   } catch (err) {
-    alert('Error: ' + err.message);
+    alert(t('alertErrorPrefix') + err.message);
   }
 });
 
 async function loadAdminUsers() {
   const tbody = $('admin-users-tbody');
-  tbody.innerHTML = '<tr><td colspan="5">Loading…</td></tr>';
+  tbody.innerHTML = `<tr><td colspan="5">${escHtml(t('loading'))}</td></tr>`;
   try {
     const users = await api('GET', '/users');
     tbody.innerHTML = '';
     if (!users.length) {
-      tbody.innerHTML = '<tr><td colspan="5">No users found.</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="5">${escHtml(t('noUsersFound'))}</td></tr>`;
       return;
     }
     users.forEach(u => {
@@ -496,17 +561,17 @@ async function loadAdminUsers() {
       const roleClass = 'role-' + u.role.replace('-', '_');
       const roleSelector = !isSelf ? `
         <select class="field-input field-input-xs" data-action="select-role">
-          <option value="user" ${u.role==='user'?'selected':''}>user</option>
-          <option value="co-admin" ${u.role==='co-admin'?'selected':''}>co-admin</option>
-          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
+          <option value="user" ${u.role==='user'?'selected':''}>${escHtml(t('adminRoleUser'))}</option>
+          <option value="co-admin" ${u.role==='co-admin'?'selected':''}>${escHtml(t('adminRoleCoAdmin'))}</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>${escHtml(t('adminRoleAdmin'))}</option>
         </select>
-        <button class="btn btn-primary btn-sm" data-action="change-role" data-uid="${u.id}">Apply</button>
+        <button class="btn btn-primary btn-sm" data-action="change-role" data-uid="${u.id}">${escHtml(t('btnApply'))}</button>
       ` : '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td><strong>${escHtml(u.username)}</strong></td>
-        <td><span class="role-badge ${roleClass}">${escHtml(u.role)}</span></td>
+        <td><span class="role-badge ${roleClass}">${escHtml(translateRole(u.role))}</span></td>
         <td>${formatDate(u.createdAt)}</td>
         <td>
           <div class="table-actions">
@@ -515,10 +580,10 @@ async function loadAdminUsers() {
         </td>
         <td>
           <div class="table-actions">
-            <button class="btn btn-ghost btn-sm" data-action="reset-pw" data-uid="${u.id}">Reset PW</button>
+            <button class="btn btn-ghost btn-sm" data-action="reset-pw" data-uid="${u.id}">${escHtml(t('btnResetPw'))}</button>
             ${!isSelf
-              ? `<button class="btn btn-danger btn-sm" data-action="delete-user" data-uid="${u.id}">Delete</button>`
-              : '<span class="role-badge role-user">you</span>'}
+              ? `<button class="btn btn-danger btn-sm" data-action="delete-user" data-uid="${u.id}">${escHtml(t('btnDelete'))}</button>`
+              : `<span class="role-badge role-user">${escHtml(t('youBadge'))}</span>`}
           </div>
         </td>
       `;
@@ -542,24 +607,24 @@ $('admin-users-tbody').addEventListener('click', async e => {
     $('reset-pw-form').style.display = '';
     $('reset-pw-input').focus();
   } else if (action === 'delete-user') {
-    if (!confirm('Delete this user? This cannot be undone.')) return;
+    if (!confirm(t('confirmDeleteUser'))) return;
     try {
       await api('DELETE', '/users/' + uid);
       await loadAdminUsers();
     } catch (err) {
-      alert('Error: ' + err.message);
+      alert(t('alertErrorPrefix') + err.message);
     }
   } else if (action === 'change-role') {
     const row = btn.closest('tr');
     const select = row.querySelector('[data-action="select-role"]');
     if (!select) return;
     const newRole = select.value;
-    if (!confirm(`Change this user's role to "${newRole}"?`)) return;
+    if (!confirm(tf('confirmChangeRole', { role: translateRole(newRole) }))) return;
     try {
       await api('PUT', '/users/' + uid + '/role', { role: newRole });
       await loadAdminUsers();
     } catch (err) {
-      alert('Error: ' + err.message);
+      alert(t('alertErrorPrefix') + err.message);
     }
   }
 });
@@ -575,12 +640,12 @@ $('admin-sessions-search').addEventListener('input', e => {
 
 async function loadAdminSessions() {
   const tbody = $('admin-sessions-tbody');
-  tbody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+  tbody.innerHTML = `<tr><td colspan="6">${escHtml(t('loading'))}</td></tr>`;
   try {
     const sessions = await api('GET', '/sessions');
     tbody.innerHTML = '';
     if (!sessions.length) {
-      tbody.innerHTML = '<tr><td colspan="6">No sessions yet.</td></tr>';
+      tbody.innerHTML = `<tr><td colspan="6">${escHtml(t('noSessionsYetAdmin'))}</td></tr>`;
       return;
     }
     sessions.forEach(s => {
@@ -590,11 +655,11 @@ async function loadAdminSessions() {
         <td data-username="${escHtml(s.username || '')}">${escHtml(s.username || '?')}</td>
         <td><strong>${escHtml(s.name)}</strong></td>
         <td>${formatDate(s.startTime)}</td>
-        <td>${s.duration ? formatDuration(s.duration) : (s.endTime ? '—' : '<em>active</em>')}</td>
+        <td>${s.duration ? formatDuration(s.duration) : (s.endTime ? '—' : `<em>${escHtml(t('activeLabel'))}</em>`)}</td>
         <td><span class="epoch-badge" id="epoch-count-${s.id}">—</span></td>
         <td>
           <button class="btn btn-secondary btn-sm" data-action="view-analytics" data-sid="${s.id}" data-sname="${escHtml(s.name)}">
-            View Analytics
+            ${escHtml(t('btnViewAnalytics'))}
           </button>
         </td>
       `;
@@ -649,7 +714,7 @@ function setAnalyticsState(state) {
 
 async function openSessionAnalytics(sessionId, sessionName) {
   currentAnalyticsSessionId = sessionId;
-  $('analytics-session-name').textContent = sessionName || 'Session';
+  $('analytics-session-name').textContent = sessionName || t('aiBabaSessionFallbackName');
   $('analytics-session-meta').textContent = '';
   $('analytics-overlay').style.display = '';
   setAnalyticsState('loading');
@@ -670,50 +735,52 @@ async function openSessionAnalytics(sessionId, sessionName) {
 function pct(v) { return v != null ? Math.round(v * 100) + '%' : '—'; }
 
 function renderAnalyticsSummary(s) {
-  $('a-total-epochs').textContent = s.totalEpochs ?? '—';
+  $('a-total-epochs').textContent = s.totalEpochs != null ? localizeNumber(s.totalEpochs) : '—';
   $('a-duration').textContent = s.durationSeconds ? formatDuration(s.durationSeconds) : '—';
   $('a-dominant-guna').textContent = s.dominantGuna ? t(s.dominantGuna.toLowerCase()) : '—'; // 'sattva'/'rajas'/'tamas' key
   $('a-dominant-state').textContent = s.dominantState ? translateState(s.dominantState) : '—';
-  $('a-avg-spo2').textContent = s.avgSpo2 != null ? s.avgSpo2.toFixed(1) : '—';
-  $('a-avg-hr').textContent = s.avgHr != null ? s.avgHr.toFixed(0) : '—';
+  $('a-avg-spo2').textContent = s.avgSpo2 != null ? localizeNumber(s.avgSpo2.toFixed(1)) : '—';
+  $('a-avg-hr').textContent = s.avgHr != null ? localizeNumber(s.avgHr.toFixed(0)) : '—';
 
   const gunas = s.avgGunas || {};
   ['sattva', 'rajas', 'tamas'].forEach(g => {
     const barEl = $('a-bar-' + g);
     const pctEl = $('a-pct-' + g);
     if (barEl) barEl.style.width = (gunas[g] != null ? Math.round(gunas[g] * 100) : 0) + '%';
-    if (pctEl) pctEl.textContent = pct(gunas[g]);
+    if (pctEl) pctEl.textContent = localizeNumber(pct(gunas[g]));
   });
 
-  renderBreakdown('a-state-breakdown', s.stateCounts || {}, s.totalEpochs || 0);
-  renderBreakdown('a-swara-breakdown', s.swaraCounts || {}, s.totalEpochs || 0);
+  renderBreakdown('a-state-breakdown', s.stateCounts || {}, s.totalEpochs || 0, translateState);
+  renderBreakdown('a-swara-breakdown', s.swaraCounts || {}, s.totalEpochs || 0, translateSwaraNadi);
 
   const bandsEl = $('a-avg-bands');
   if (bandsEl) {
     const syms = { delta: 'δ', theta: 'θ', alpha: 'α', beta: 'β', gamma: 'γ' };
+    const nameKeys = { delta: 'bandDelta', theta: 'bandTheta', alpha: 'bandAlpha', beta: 'bandBeta', gamma: 'bandGamma' };
     const avgBands = s.avgBands || {};
     bandsEl.innerHTML = ['delta', 'theta', 'alpha', 'beta', 'gamma'].map(b => `
       <div class="analytics-band-pill">
         <span class="analytics-band-sym">${syms[b]}</span>
-        <span class="analytics-band-name">${b}</span>
-        <span class="analytics-band-val">${pct(avgBands[b])}</span>
+        <span class="analytics-band-name">${escHtml(t(nameKeys[b]))}</span>
+        <span class="analytics-band-val">${localizeNumber(pct(avgBands[b]))}</span>
       </div>
     `).join('');
   }
 }
 
-function renderBreakdown(containerId, counts, total) {
+function renderBreakdown(containerId, counts, total, translateLabel) {
   const el = $(containerId);
   if (!el) return;
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No data.</p>'; return; }
+  if (!entries.length) { el.innerHTML = `<p style="color:var(--text-muted);font-size:12px">${escHtml(t('noDataDot'))}</p>`; return; }
   el.innerHTML = entries.map(([label, count]) => {
     const p = total ? Math.round((count / total) * 100) : 0;
+    const displayLabel = translateLabel ? translateLabel(label) : label;
     return `
       <div class="breakdown-item">
-        <span class="breakdown-label">${escHtml(label)}</span>
+        <span class="breakdown-label">${escHtml(displayLabel)}</span>
         <div class="breakdown-bar-bg"><div class="breakdown-bar" style="width:${p}%"></div></div>
-        <span class="breakdown-pct">${p}%</span>
+        <span class="breakdown-pct">${localizeNumber(p)}%</span>
       </div>
     `;
   }).join('');
@@ -724,13 +791,13 @@ function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; 
 function renderAnalyticsTimeline(phases) {
   const el = $('a-timeline');
   if (!el) return;
-  if (!phases.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No phase data.</p>'; return; }
+  if (!phases.length) { el.innerHTML = `<p style="color:var(--text-muted);font-size:12px">${escHtml(t('noPhaseDataDot'))}</p>`; return; }
   el.innerHTML = phases.map(p => `
     <div class="timeline-phase">
-      <strong>${escHtml(p.state)}</strong>
-      <span>${escHtml(p.depth || '')}</span>
+      <strong>${escHtml(translateState(p.state))}</strong>
+      <span>${escHtml(p.depth ? translateDepth(p.depth) : '')}</span>
       <span>${formatTime(p.fromSeconds)} – ${formatTime(p.toSeconds)}</span>
-      <span>${p.epochCount} epochs</span>
+      <span>${localizeNumber(p.epochCount)} ${p.epochCount !== 1 ? t('aiBabaEpochPlural') : t('aiBabaEpochSingular')}</span>
     </div>
   `).join('');
 }
@@ -743,9 +810,9 @@ async function loadAnalyticsNotes(sessionId) {
     const data = await api('GET', '/sessions/' + sessionId + '/notes');
     el.innerHTML = data.content
       ? escHtml(data.content).replace(/\n/g, '<br>')
-      : '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
+      : `<em class="analytics-notes-empty">${escHtml(t('noNotesRecorded'))}</em>`;
   } catch {
-    el.innerHTML = '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
+    el.innerHTML = `<em class="analytics-notes-empty">${escHtml(t('noNotesRecorded'))}</em>`;
   }
 }
 
@@ -785,7 +852,7 @@ async function onShowReplay() {
   if (!sel) return;
   try {
     const sessions = await api('GET', '/sessions/mine');
-    if (!sessions.length) { sel.innerHTML = '<option value="">No sessions</option>'; replaySessionId = null; showReplayNoData(); return; }
+    if (!sessions.length) { sel.innerHTML = `<option value="">${escHtml(t('noSessionsOption'))}</option>`; replaySessionId = null; showReplayNoData(); return; }
     sel.innerHTML = sessions.map(s =>
       `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
     const target = pendingReplaySessionId || replaySessionId || sessions[0].id;
@@ -803,7 +870,7 @@ function startReplay() {
   // If parked at the end, restart from the top instead of dead-stopping.
   if (replayIndex >= replayEpochs.length - 1) updateReplayDisplay(0);
   replayPlaying = true;
-  $('replay-play-pause').textContent = '⏸ Pause';
+  $('replay-play-pause').textContent = t('pauseLabel');
   replayTimer = setInterval(() => {
     if (replayIndex >= replayEpochs.length - 1) { stopReplay(); return; }
     updateReplayDisplay(replayIndex + 1);
@@ -813,7 +880,7 @@ function startReplay() {
 function stopReplay() {
   replayPlaying = false;
   clearInterval(replayTimer); replayTimer = null;
-  $('replay-play-pause').textContent = '▶ Play';
+  $('replay-play-pause').textContent = t('playLabel');
 }
 
 async function loadReplayData() {
@@ -838,12 +905,16 @@ async function loadReplayData() {
   // Session-level readout: phase scrubber + honest metrics strip from /analytics.
   try {
     const a = await api('GET', '/sessions/' + sid + '/analytics');
-    renderReplayScrubber(a.phases || [], a.summary?.durationSeconds || 0);
+    lastReplaySummary = a.summary || null;
+    lastReplayPhases = a.phases || [];
+    renderReplayScrubber(lastReplayPhases, a.summary?.durationSeconds || 0);
     renderReplayMetrics(a.summary || {});
-    const metaEl = $('replay-view-meta');
-    if (metaEl) metaEl.textContent = a.summary?.totalEpochs
-      ? `${a.summary.totalEpochs} epochs · ${formatDuration(a.summary.durationSeconds || 0)}` : '';
-  } catch { /* scrubber/metrics are enrichments — replay still works without them */ }
+    renderReplayViewMeta(a.summary || null);
+  } catch {
+    lastReplaySummary = null;
+    lastReplayPhases = [];
+    /* scrubber/metrics are enrichments — replay still works without them */
+  }
 
   if (!replayEpochs.length) { showReplayNoData(); return; }
 
@@ -868,7 +939,7 @@ function renderReplayScrubber(phases, totalSeconds) {
     const left = Math.max(0, Math.min(100, from / total * 100));
     const width = Math.max(0.5, Math.min(100 - left, (to - from) / total * 100));
     const col = colors[p.state] || 'var(--text-muted)';
-    return `<span class="scrubber__phase" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${col}" title="${escHtml(p.state)}"></span>`;
+    return `<span class="scrubber__phase" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${col}" title="${escHtml(translateState(p.state))}"></span>`;
   }).join('');
 }
 
@@ -877,14 +948,22 @@ function renderReplayMetrics(s) {
   const strip = $('replay-metrics');
   if (!strip) return;
   const cells = [
-    ['Dominant state', s.dominantState || '—'],
-    ['Dominant guṇa', s.dominantGuna ? capitalize(s.dominantGuna) : '—'],
-    ['Avg SpO₂', s.avgSpo2 != null ? s.avgSpo2.toFixed(1) + '%' : '—'],
-    ['Avg HR', s.avgHr != null ? Math.round(s.avgHr) + ' bpm' : '—'],
-    ['Epochs', s.totalEpochs != null ? String(s.totalEpochs) : '—'],
+    [t('dominantStateLabel'), s.dominantState ? translateState(s.dominantState) : '—'],
+    [t('dominantGunaLabel'), s.dominantGuna ? t(s.dominantGuna.toLowerCase()) : '—'],
+    [t('avgSpo2Label'), s.avgSpo2 != null ? localizeNumber(s.avgSpo2.toFixed(1)) + '%' : '—'],
+    [t('avgHrLabel'), s.avgHr != null ? localizeNumber(Math.round(s.avgHr)) + ' bpm' : '—'],
+    [t('epochsLabel'), s.totalEpochs != null ? localizeNumber(s.totalEpochs) : '—'],
   ];
   strip.innerHTML = cells.map(([k, v]) =>
     `<div class="metrics-strip__cell"><span class="metrics-strip__label">${k}</span><span class="metrics-strip__value">${escHtml(String(v))}</span></div>`).join('');
+}
+
+function renderReplayViewMeta(summary) {
+  const metaEl = $('replay-view-meta');
+  if (!metaEl) return;
+  metaEl.textContent = summary && summary.totalEpochs
+    ? tf('replayViewMetaTemplate', { epochs: localizeNumber(summary.totalEpochs), duration: formatDuration(summary.durationSeconds || 0) })
+    : '';
 }
 
 function showReplayNoData() {
@@ -957,13 +1036,13 @@ function updateReplayDisplay(idx) {
 
 // ── Session management ────────────────────────────────────────────────────────
 $('btn-start-session').addEventListener('click', async () => {
-  const name = prompt('Session name:', 'Session ' + new Date().toLocaleDateString());
+  const name = prompt(t('sessionNamePrompt'), t('sessionDefaultPrefix') + new Date().toLocaleDateString());
   if (name === null) return;
 
   try {
     const clientSel = $('session-client-select');
     const clientId = clientSel && clientSel.value ? clientSel.value : null;
-    const sess = await api('POST', '/sessions/start', { name: name.trim() || 'New Session', client_id: clientId });
+    const sess = await api('POST', '/sessions/start', { name: name.trim() || t('newSessionFallbackName'), client_id: clientId });
     activeSession = sess;
     sessionStartTimestamp = new Date();
     sessionEpochCounter = 0;
@@ -982,7 +1061,7 @@ $('btn-start-session').addEventListener('click', async () => {
     }, 1000);
     $('session-timer').textContent = localizeNumber('0:00');
   } catch (err) {
-    alert('Failed to start session: ' + err.message);
+    alert(t('failedToStartSessionPrefix') + err.message);
   }
 });
 
@@ -1019,7 +1098,7 @@ async function loadSessionHistory() {
     const sessions = await api('GET', '/sessions/mine');
     list.innerHTML = '';
     if (!sessions.length) {
-      list.innerHTML = '<div id="history-empty" class="history-empty">No sessions yet</div>';
+      list.innerHTML = `<div id="history-empty" class="history-empty">${escHtml(t('noSessionsYet'))}</div>`;
       return;
     }
     sessions.slice(0, 5).forEach(s => {
@@ -1036,7 +1115,7 @@ $('btn-toggle-history').addEventListener('click', () => {
   const btn = $('btn-toggle-history');
   const isHidden = list.style.display === 'none';
   list.style.display = isHidden ? '' : 'none';
-  btn.textContent = isHidden ? 'Hide' : 'Show';
+  btn.textContent = isHidden ? t('hide') : t('show');
 });
 
 // Store epoch to database (fire-and-forget)
@@ -1334,14 +1413,14 @@ $('btn-demo').addEventListener('click', () => {
   if (mode === 'demo') {
     clearInterval(demoTimer); demoTimer = null;
     mode = 'idle'; setStatus('', t('disconnected'));
-    $('btn-demo').textContent = '▶ Demo';
+    $('btn-demo').textContent = t('demoLabel');
     return;
   }
   if (mode === 'bluetooth') disconnectBluetooth();
   mode = 'demo';
   resetSmoothing();
   setStatus('demo', t('statusDemoMode'));
-  $('btn-demo').textContent = '⏹ Stop Demo';
+  $('btn-demo').textContent = t('stopDemoLabel');
 
   const ALL_DEMO_STATES = ['Mudha','Kshipta','Vikshipta','Ekagra','Niruddha'];
   const runDemo = () => {
@@ -1607,7 +1686,7 @@ const DRIVERS = [MuseDriver, BrainBitDriver];
 
 async function connectBluetooth() {
   if (!navigator.bluetooth) {
-    alert('Web Bluetooth is not available. Please use Chrome or Edge on desktop.');
+    alert(t('webBluetoothUnavailable'));
     return;
   }
   try {
@@ -1637,7 +1716,7 @@ async function connectBluetooth() {
     for (const d of DRIVERS) {
       if (await d.isMatch(server)) { driver = d; break; }
     }
-    if (!driver) throw new Error('No compatible EEG driver for this device');
+    if (!driver) throw new Error(t('noCompatibleDriver'));
 
     activeDriver = driver;
     activeSampleRate = driver.sampleRate;
@@ -1846,8 +1925,8 @@ function onMusePPG(ev, channel) {
 
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl && latestHeartRate != null) { hrEl.textContent = latestHeartRate.toFixed(0); if (hrSt) hrSt.textContent = 'live reading'; }
-    if (spo2El && latestSpO2 != null)   { spo2El.textContent = latestSpO2.toFixed(1);   if (spo2St) spo2St.textContent = 'live reading'; }
+    if (hrEl && latestHeartRate != null) { hrEl.textContent = localizeNumber(latestHeartRate.toFixed(0)); if (hrSt) hrSt.textContent = t('liveReading'); }
+    if (spo2El && latestSpO2 != null)   { spo2El.textContent = localizeNumber(latestSpO2.toFixed(1));   if (spo2St) spo2St.textContent = t('liveReading'); }
   }
 }
 
@@ -1996,7 +2075,7 @@ function stopAll() {
   mode = 'idle';
   setStatus('', t('disconnected'));
   const demoBtn = $('btn-demo');
-  if (demoBtn) demoBtn.textContent = '▶ Demo';
+  if (demoBtn) demoBtn.textContent = t('demoLabel');
 }
 
 // ── Canvas / waveform ─────────────────────────────────────────────────────────
@@ -2151,15 +2230,15 @@ function renderCorroboration(r) {
         <span class="corrob-mark ${tone}">${corrGlyph(a.agrees)}</span>
         <div class="corrob-text">
           <span class="corrob-name">${escHtml(t('axis_' + a.axis) || a.axis)}</span>
-          <span class="corrob-note">${escHtml(a.note || '')}</span>
+          <span class="corrob-note">${escHtml(translateCorrobNote(a.note) || '')}</span>
         </div>
-        <span class="corrob-reading">${escHtml(chip)}</span>
+        <span class="corrob-reading">${escHtml(translateCorrobReading(chip))}</span>
       </div>`;
   }).join('');
 
   const tentative = co.indeterminate ? `<span class="corrob-tentative">${escHtml(t('corrobHeldGently'))}</span>` : '';
   const caveat = co.caveat
-    ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(co.caveat)}</span></div>`
+    ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(translateCorrobCaveat(co.caveat))}</span></div>`
     : '';
 
   host.innerHTML = `
@@ -2187,7 +2266,7 @@ function setTextureBar(key, pct, prefix) {
 function renderAnalyzeTexture(s) {
   setTextureBar('vritti', s.avgVritti != null ? s.avgVritti * 100 : null, 'an-');
   const nir = $('an-nirodha-state');
-  if (nir) nir.textContent = s.avgVritti != null ? nirodhaLabel(s.avgVritti) : '—';
+  if (nir) nir.textContent = s.avgVritti != null ? translateNirodha(nirodhaLabel(s.avgVritti)) : '—';
 
   const cx = s.avgComplexity;
   let richness = null;
@@ -2214,8 +2293,8 @@ function renderAnalyzeTattva(flags) {
   const el = $('an-tattva-flags');
   if (!el) return;
   el.innerHTML = (flags && flags.length)
-    ? flags.map(f => `<span class="tattva-tag">${escHtml(f.flag)} <em>(${f.count})</em></span>`).join('')
-    : '<span class="tattva-tag muted">None detected</span>';
+    ? flags.map(f => `<span class="tattva-tag">${escHtml(translateTattvaFlag(f.flag))} <em>(${localizeNumber(f.count)})</em></span>`).join('')
+    : `<span class="tattva-tag muted">${escHtml(t('noneDetected'))}</span>`;
 }
 
 function clamp01(x) { return (x == null || isNaN(x)) ? 0 : Math.max(0, Math.min(1, x)); }
@@ -2242,6 +2321,12 @@ function translateDataQuality(q) {
   if (!q) return q;
   const key = DATA_QUALITY_KEYS[q];
   return key ? t(key) : q;
+}
+
+const ROLE_KEYS = { user: 'adminRoleUser', 'co-admin': 'adminRoleCoAdmin', admin: 'adminRoleAdmin' };
+function translateRole(role) {
+  const key = ROLE_KEYS[role];
+  return key ? t(key) : role;
 }
 
 // Plain-language band over the vṛtti index — mirrors the backend thresholds.
@@ -2596,15 +2681,15 @@ async function openAiBaba() {
         const time = s.start_time ? new Date(s.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
         const dur  = s.duration_seconds ? `${Math.floor(s.duration_seconds / 60)}m ${s.duration_seconds % 60}s` : '—';
         const epochs = s.epoch_count || 0, hasData = epochs > 0;
-        return `<div class="ai-baba-session-item" data-id="${escHtml(String(s.id))}" data-name="${escHtml(s.name || 'Session')}"
+        return `<div class="ai-baba-session-item" data-id="${escHtml(String(s.id))}" data-name="${escHtml(s.name || t('aiBabaSessionFallbackName'))}"
                      ${!hasData ? 'style="opacity:0.5;pointer-events:none" aria-disabled="true"' : 'tabindex="0" role="button"'}>
-          <div class="ai-baba-session-item-name">${escHtml(s.name || 'Untitled Session')}</div>
+          <div class="ai-baba-session-item-name">${escHtml(s.name || t('untitledSession'))}</div>
           <div class="ai-baba-session-item-meta">
             <span>${escHtml(date)}${time ? ' · ' + escHtml(time) : ''}</span>
             <span>${escHtml(dur)}</span>
-            <span>${epochs} epoch${epochs !== 1 ? 's' : ''}</span>
+            <span>${localizeNumber(epochs)} ${epochs !== 1 ? t('aiBabaEpochPlural') : t('aiBabaEpochSingular')}</span>
           </div>
-          ${!hasData ? '<div class="ai-baba-session-item-nodata">No EEG data recorded</div>' : ''}
+          ${!hasData ? `<div class="ai-baba-session-item-nodata">${escHtml(t('noEegDataRecorded'))}</div>` : ''}
         </div>`;
       }).join('');
       listEl.style.display = '';
@@ -2612,11 +2697,12 @@ async function openAiBaba() {
         item.addEventListener('click', () => aiBabaSelectSession(item.dataset.id, item.dataset.name));
         item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aiBabaSelectSession(item.dataset.id, item.dataset.name); } });
       });
+      localizeDom(listEl);
     }
   } catch (err) {
     if (loadingEl) loadingEl.style.display = 'none';
     if (emptyEl) {
-      emptyEl.textContent = 'Failed to load sessions — ' + (err.message || 'unknown error') + '. Please try again.';
+      emptyEl.textContent = t('aiBabaFailedToLoadSessions') + (err.message || t('aiBabaUnknownErrorLower')) + t('aiBabaPleaseTryAgainSuffix');
       emptyEl.style.display = '';
     }
   }
@@ -2630,16 +2716,16 @@ async function aiBabaSelectSession(sessionId, sessionName) {
   try {
     const data = await api('POST', '/ai/start', { session_id: sessionId, lang: getLang() });
     aiBabaShowStep('chat');
-    const summary = data.summary || 'Here is a summary of your session.';
+    const summary = data.summary || t('aiBabaDefaultSummary');
     aiBabaAddMessage('assistant', summary);
     aiBabaChatHistory.push({ role: 'assistant', content: summary });
     setTimeout(() => { const inp = $('ai-baba-input'); if (inp) inp.focus(); }, 100);
   } catch (err) {
     aiBabaShowStep('chat');
     aiBabaAddMessage('assistant',
-      'Namaste 🙏 I had trouble loading your session data.\n\n' +
-      '⚠️ Error: ' + (err.message || 'Unknown error') + '\n\n' +
-      'Please try again or select a different session.', true);
+      t('aiBabaTroubleLoading') + '\n\n' +
+      t('aiBabaErrorPrefix') + (err.message || t('unknownErrorLabel')) + '\n\n' +
+      t('aiBabaTryAgainDifferent'), true);
   }
 }
 
@@ -2655,12 +2741,12 @@ async function aiBabaSendMessage() {
   try {
     const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20), lang: getLang() });
     aiBabaSetTyping(false);
-    const reply = data.reply || 'I could not process that. Please try again.';
+    const reply = data.reply || t('aiBabaCouldNotProcess');
     aiBabaAddMessage('assistant', reply);
     aiBabaChatHistory.push({ role: 'assistant', content: reply });
   } catch (err) {
     aiBabaSetTyping(false);
-    aiBabaAddMessage('assistant', 'Something went wrong — ' + (err.message || 'unknown error') + '. Please try again.', true);
+    aiBabaAddMessage('assistant', t('aiBabaSomethingWentWrong') + (err.message || t('aiBabaUnknownErrorLower')) + t('aiBabaPleaseTryAgainSuffix'), true);
   }
   aiBabaSending = false;
 }
@@ -2702,6 +2788,7 @@ function closeAiBaba() {
 // states for missing data.
 // ════════════════════════════════════════════════════════════════════════════
 const AN_BAND_COLORS  = { delta:'#9B6FBE', theta:'#5B8DB8', alpha:'#56A67A', beta:'#D4973A', gamma:'#C75C5C' };
+const BAND_NAME_KEYS  = { delta:'bandDelta', theta:'bandTheta', alpha:'bandAlpha', beta:'bandBeta', gamma:'bandGamma' };
 const AN_GUNA_COLORS  = { sattva:'#C9A84C', rajas:'#C75C5C', tamas:'#5A6DAA' };
 const AN_BHUMI_COLORS = { Mudha:'#8A8F98', Kshipta:'#E08030', Vikshipta:'#D97757', Ekagra:'#5B8DB8', Niruddha:'#7C68A8' };
 const AN_SWARA_COLORS = { ida:'#5B8DB8', pingala:'#D97757', sushumna:'#56A67A' };
@@ -2731,7 +2818,7 @@ async function onShowAnalyze() {
   if (!picker) return;
   try {
     const sessions = await api('GET', '/sessions/mine');
-    if (!sessions.length) { picker.innerHTML = '<option value="">No sessions</option>'; anSetEmpty('Record a session first, then analyze it here.'); return; }
+    if (!sessions.length) { picker.innerHTML = `<option value="">${escHtml(t('noSessionsOption'))}</option>`; anSetEmpty(t('recordSessionFirstHint')); return; }
     picker.innerHTML = sessions.map(s =>
       `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
     const preferred = analyzeSessionId
@@ -2741,7 +2828,7 @@ async function onShowAnalyze() {
     picker.onchange = () => loadAnalyzeSession(picker.value);
     await loadAnalyzeSession(picker.value);
   } catch (err) {
-    anSetEmpty('Could not load sessions: ' + err.message);
+    anSetEmpty(t('couldNotLoadSessions') + err.message);
   }
 }
 
@@ -2750,13 +2837,16 @@ async function loadAnalyzeSession(id) {
   if (!id) return;
   try {
     const a = await api('GET', '/sessions/' + id + '/analytics');
-    if (!a.summary || !a.summary.totalEpochs) { anSetEmpty('This session has no epoch data to analyze.'); return; }
+    if (!a.summary || !a.summary.totalEpochs) { anSetEmpty(t('noEpochDataToAnalyze')); return; }
     const eps = await api('GET', '/sessions/' + id + '/epochs').catch(() => []);
     const s = a.summary;
     $('analyze-empty').style.display = 'none';
     $('analyze-body').style.display = '';
-    $('analyze-session-meta').textContent =
-      `${s.totalEpochs} epochs · ${formatDuration(s.durationSeconds || 0)} · dominant: ${s.dominantState || '—'}`;
+    $('analyze-session-meta').textContent = tf('analyzeSessionMetaTemplate', {
+      epochs: localizeNumber(s.totalEpochs),
+      duration: formatDuration(s.durationSeconds || 0),
+      dominant: s.dominantState ? translateState(s.dominantState) : '—',
+    });
     drawBandRadar(s.avgBands || {});
     drawGunaTriangle(s.avgGunas || {});
     drawBhumiRing(s.stateCounts || {});
@@ -2767,7 +2857,7 @@ async function loadAnalyzeSession(id) {
     renderAnalyzeTattva(s.tattvaFlags || []);
     localizeDom(document.querySelector('.analyze'));
   } catch (err) {
-    anSetEmpty('Could not load analytics: ' + err.message);
+    anSetEmpty(t('couldNotLoadAnalytics') + err.message);
   }
 }
 
@@ -2783,7 +2873,7 @@ function drawBandRadar(avgBands) {
     const [ax, ay] = anPol(0, 0, maxR, ang(i));
     svg += `<line x1="0" y1="0" x2="${ax.toFixed(1)}" y2="${ay.toFixed(1)}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>`;
     const [lx, ly] = anPol(0, 0, maxR + 17, ang(i));
-    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${b}</text>`;
+    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${escHtml(t(BAND_NAME_KEYS[b]))}</text>`;
   });
   const dpts = bands.map((b, i) => anPol(0, 0, maxR * Math.max(0, Math.min(1, anNum(avgBands[b]))), ang(i)).map(v => v.toFixed(1)).join(',')).join(' ');
   svg += `<polygon points="${dpts}" fill="var(--accent)" fill-opacity="0.28" stroke="var(--accent)" stroke-width="2"/>`;
@@ -2800,15 +2890,15 @@ function drawGunaTriangle(g) {
   for (const k of ['sattva', 'rajas', 'tamas']) {
     const [vx, vy] = V[k], lx = vx * 1.16, ly = vy === -90 ? vy - 9 : vy + 18;
     svg += `<circle cx="${vx}" cy="${vy}" r="4" fill="${AN_GUNA_COLORS[k]}"/>`;
-    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${k}</text>`;
+    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${escHtml(t(k))}</text>`;
   }
-  const s = anNum(g.sattva), r = anNum(g.rajas), t = anNum(g.tamas), sum = s + r + t;
+  const s = anNum(g.sattva), r = anNum(g.rajas), tm = anNum(g.tamas), sum = s + r + tm;
   if (sum > 0) {
-    const px = (s * V.sattva[0] + r * V.rajas[0] + t * V.tamas[0]) / sum;
-    const py = (s * V.sattva[1] + r * V.rajas[1] + t * V.tamas[1]) / sum;
+    const px = (s * V.sattva[0] + r * V.rajas[0] + tm * V.tamas[0]) / sum;
+    const py = (s * V.sattva[1] + r * V.rajas[1] + tm * V.tamas[1]) / sum;
     svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="1.5"/>`;
   } else {
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">no guṇa data</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">${escHtml(t('noGunaData'))}</text>`;
   }
   $('an-guna-tri').innerHTML = svg;
 }
@@ -2821,23 +2911,23 @@ function drawBhumiRing(counts) {
   let svg = '';
   if (!sum) {
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="var(--bg-card-2)" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">no data</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">${escHtml(t('noDataLower'))}</text>`;
   } else if (entries.length === 1) {
     const [k] = entries[0];
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="${AN_BHUMI_COLORS[k] || 'var(--accent)'}" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(k)}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">100%</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(translateState(k))}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${localizeNumber(100)}%</text>`;
   } else {
     let a0 = -90;
     entries.forEach(([k, c]) => {
       const sweep = c / sum * 360, a1 = a0 + sweep, col = AN_BHUMI_COLORS[k] || 'var(--text-muted)';
       svg += `<path d="${anArcSeg(0, 0, rO, rI, a0, a1)}" fill="${col}"/>`;
-      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${Math.round(c / sum * 100)}%</text>`; }
+      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${localizeNumber(Math.round(c / sum * 100))}%</text>`; }
       a0 = a1;
     });
     const dom = entries.slice().sort((a, b) => b[1] - a[1])[0][0];
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(dom)}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">dominant</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(translateState(dom))}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${escHtml(t('dominantSuffix'))}</text>`;
   }
   $('an-bhumi-ring').innerHTML = svg;
 }
@@ -2848,7 +2938,7 @@ function drawSwaraGauge(counts) {
   let svg = '';
   if (!sum) {
     svg += `<path d="${anArcSeg(cx, cy, r, rI, 180, 360)}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">no svara data</text>`;
+    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">${escHtml(t('noSvaraData'))}</text>`;
   } else {
     let a0 = 180;
     order.forEach(k => { const frac = anNum(counts[k]) / sum; if (frac <= 0) return; const a1 = a0 + frac * 180; svg += `<path d="${anArcSeg(cx, cy, r, rI, a0, a1)}" fill="${AN_SWARA_COLORS[k]}"/>`; a0 = a1; });
@@ -2860,7 +2950,7 @@ function drawSwaraGauge(counts) {
   const lx = [24, 108, 188];
   order.forEach((k, i) => {
     svg += `<circle cx="${lx[i]}" cy="118" r="4" fill="${AN_SWARA_COLORS[k]}"/>`;
-    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${k} ${anNum(counts[k])}</text>`;
+    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${escHtml(translateSwaraNadi(capitalize(k)))} ${localizeNumber(anNum(counts[k]))}</text>`;
   });
   $('an-swara-gauge').innerHTML = svg;
 }
@@ -2876,14 +2966,14 @@ function drawDepthMeter(eps, summary) {
     AN_DEPTH_ORDER.forEach(d => { const segW = counts[d] / n * w; if (segW > 0) { svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="${h}" fill="${AN_DEPTH_COLORS[d]}"/>`; x += segW; } });
   } else {
     svg += `<rect x="${x0}" y="${y}" width="${w}" height="${h}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">no depth data</text>`;
+    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">${escHtml(t('noDepthData'))}</text>`;
   }
-  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(t => { const tx = x0 + (DEPTH_PCT[t] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${t}</text>`; });
+  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(dp => { const tx = x0 + (DEPTH_PCT[dp] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${escHtml(translateDepth(dp))}</text>`; });
   const domDepth = CHITTA_DEPTHS[summary.dominantState];
   if (domDepth && DEPTH_PCT[domDepth] != null) {
     const mx = x0 + (DEPTH_PCT[domDepth] / 100) * w;
     svg += `<polygon points="${mx.toFixed(1)},${y - 5} ${(mx - 5).toFixed(1)},${y - 13} ${(mx + 5).toFixed(1)},${y - 13}" fill="var(--text)"/>`;
-    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${escHtml(domDepth)}</text>`;
+    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${escHtml(translateDepth(domDepth))}</text>`;
   }
   $('an-depth-meter').innerHTML = svg;
 }
@@ -2900,7 +2990,7 @@ function drawSensorSchematic(avgBands) {
     svg += `<circle cx="${dx}" cy="${dy}" r="9" fill="${col}" fill-opacity="0.55" stroke="${col}" stroke-width="2"/>`;
     svg += `<text x="${dx}" y="${dy + 3}" fill="var(--text)" font-size="8" font-weight="700" text-anchor="middle">${lbl}</text>`;
   });
-  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? dom + ' dominant' : 'no band data'}</text>`;
+  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? escHtml(tf('bandDominantTemplate', { band: t(BAND_NAME_KEYS[dom]) })) : escHtml(t('noBandData'))}</text>`;
   $('an-sensor').innerHTML = svg;
 }
 
@@ -2911,10 +3001,10 @@ function drawSensorSchematic(avgBands) {
 let selectedClientId = null;
 
 const CLIENT_STATUS = {
-  plateau:  { label: 'Plateau',         cls: 'status--plateau' },
-  progress: { label: 'Progress',        cls: 'status--progress' },
-  issue:    { label: 'Needs attention', cls: 'status--issue' },
-  new:      { label: 'New',             cls: 'status--new' },
+  plateau:  { get label() { return t('clientStatusPlateau'); }, cls: 'status--plateau' },
+  progress: { get label() { return t('clientStatusProgress'); }, cls: 'status--progress' },
+  issue:    { get label() { return t('clientStatusIssue'); },    cls: 'status--issue' },
+  new:      { get label() { return t('clientStatusNew'); },      cls: 'status--new' },
 };
 
 function monthsSince(iso) {
@@ -2922,9 +3012,9 @@ function monthsSince(iso) {
   const then = new Date(iso), now = new Date();
   let m = (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
   m = Math.max(0, m);
-  if (m < 1) return '<1 month practicing';
-  if (m < 12) return `${m} month${m === 1 ? '' : 's'} practicing`;
-  return `${Math.floor(m / 12)}y ${m % 12}m practicing`;
+  if (m < 1) return t('monthsPracticingLt1');
+  if (m < 12) return tf('monthsPracticing', { m, s: m === 1 ? '' : 's' });
+  return tf('yearsMonthsPracticing', { y: Math.floor(m / 12), m: m % 12 });
 }
 function isAttention(c) {
   if (c.status === 'issue' || c.status === 'plateau') return true;
@@ -2957,29 +3047,29 @@ function renderHomeKpis(clients, sessions) {
   const weekAgo = Date.now() - 7 * 864e5;
   const thisWeek = sessions.filter(s => new Date(s.startTime).getTime() >= weekAgo).length;
   const cells = [
-    ['Clients', clients.length],
-    ['Sessions this week', thisWeek],
-    ['Needs attention', clients.filter(isAttention).length],
-    ['Total sessions', sessions.length],
+    [t('kpiClients'), clients.length],
+    [t('kpiSessionsThisWeek'), thisWeek],
+    [t('kpiNeedsAttention'), clients.filter(isAttention).length],
+    [t('kpiTotalSessions'), sessions.length],
   ];
   $('home-kpis').innerHTML = cells.map(([k, v]) =>
-    `<div class="kpi"><span class="kpi__value">${v}</span><span class="kpi__label">${k}</span></div>`).join('');
+    `<div class="kpi"><span class="kpi__value">${localizeNumber(v)}</span><span class="kpi__label">${k}</span></div>`).join('');
 }
 function renderHomeAttention(clients) {
   const el = $('home-attention'), flagged = clients.filter(isAttention);
-  if (!flagged.length) { el.innerHTML = '<div class="empty-state">All clients on track.</div>'; return; }
+  if (!flagged.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('allClientsOnTrack'))}</div>`; return; }
   el.innerHTML = flagged.map(c => {
     const st = CLIENT_STATUS[c.status];
-    const reason = (c.status === 'issue' || c.status === 'plateau') && st ? st.label : 'No recent session';
-    return `<button class="hub-row" data-client-id="${c.id}"><span class="hub-row__name">${escHtml(c.name)}</span><span class="hub-row__meta">${reason}</span></button>`;
+    const reason = (c.status === 'issue' || c.status === 'plateau') && st ? st.label : t('noRecentSession');
+    return `<button class="hub-row" data-client-id="${c.id}"><span class="hub-row__name">${escHtml(c.name)}</span><span class="hub-row__meta">${escHtml(reason)}</span></button>`;
   }).join('');
 }
 function renderHomeRecent(sessions, clients) {
   const el = $('home-recent');
-  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
+  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('homeNoSessionsYet'))}</div>`; return; }
   const byId = Object.fromEntries(clients.map(c => [String(c.id), c.name]));
   el.innerHTML = sessions.slice(0, 8).map(s => {
-    const cn = s.clientId != null ? (byId[String(s.clientId)] || 'Unknown client') : 'Unassigned';
+    const cn = s.clientId != null ? (byId[String(s.clientId)] || t('unknownClientLabel')) : t('unassignedLabel');
     return `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${escHtml(cn)} · ${formatDate(s.startTime)}</span></button>`;
   }).join('');
 }
@@ -2989,18 +3079,18 @@ async function onShowCohort() {
   const grid = $('cohort-grid');
   try {
     const clients = await api('GET', '/clients');
-    $('cohort-title').textContent = `Cohort · ${clients.length} client${clients.length === 1 ? '' : 's'}`;
-    if (!clients.length) { grid.innerHTML = '<div class="empty-state">No clients yet. Add your first client to start building a cohort.</div>'; return; }
+    $('cohort-title').textContent = tf('cohortTitleWithCount', { n: localizeNumber(clients.length), s: clients.length === 1 ? '' : 's' });
+    if (!clients.length) { grid.innerHTML = `<div class="empty-state">${escHtml(t('noClientsYetHint'))}</div>`; return; }
     grid.innerHTML = clients.map(renderClientTile).join('');
   } catch (e) { grid.innerHTML = `<div class="empty-state">${escHtml(e.message)}</div>`; }
 }
 function renderClientTile(c) {
   const st = CLIENT_STATUS[c.status];
-  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : 'no sessions yet';
+  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : t('noSessionsYetLower');
   const n = c.sessionsCount ?? 0;
   return `<button class="client-tile" data-client-id="${c.id}">
-    <div class="client-tile__top"><span class="client-tile__name">${escHtml(c.name)}</span>${st ? `<span class="client-status ${st.cls}">${st.label}</span>` : ''}</div>
-    <div class="client-tile__meta">${n} session${n === 1 ? '' : 's'} · ${last}</div>
+    <div class="client-tile__top"><span class="client-tile__name">${escHtml(c.name)}</span>${st ? `<span class="client-status ${st.cls}">${escHtml(st.label)}</span>` : ''}</div>
+    <div class="client-tile__meta">${tf('sessionCountTemplate', { n: localizeNumber(n), s: n === 1 ? '' : 's' })} · ${last}</div>
     ${c.protocol ? `<div class="client-tile__protocol">${escHtml(c.protocol)}</div>` : ''}
   </button>`;
 }
@@ -3008,7 +3098,7 @@ function renderClientTile(c) {
 // ── Client profile ──
 async function onShowClient() {
   const empty = $('client-empty'), body = $('client-body');
-  if (!selectedClientId) { empty.style.display = ''; empty.textContent = 'Select a client from the Cohort view.'; body.style.display = 'none'; return; }
+  if (!selectedClientId) { empty.style.display = ''; empty.textContent = t('clientEmptyState'); body.style.display = 'none'; return; }
   try {
     const [c, sessions] = await Promise.all([
       api('GET', '/clients/' + selectedClientId),
@@ -3023,13 +3113,13 @@ async function onShowClient() {
     renderClientNotes(c);
   } catch (e) {
     empty.style.display = ''; body.style.display = 'none';
-    empty.textContent = 'Could not load client: ' + e.message;
+    empty.textContent = t('couldNotLoadClient') + e.message;
   }
 }
 function renderClientHeader(c) {
   $('client-name').textContent = c.name;
   const bits = [];
-  if (c.age != null) bits.push(c.age + ' yrs');
+  if (c.age != null) bits.push(localizeNumber(c.age) + t('yrsSuffix'));
   if (c.practicingSince) bits.push(monthsSince(c.practicingSince));
   const st = CLIENT_STATUS[c.status];
   if (st) bits.push(st.label);
@@ -3037,47 +3127,47 @@ function renderClientHeader(c) {
 }
 function renderClientStats(c) {
   const cells = [
-    ['Sessions', c.sessionsCount ?? 0],
-    ['Last session', c.lastSessionAt ? formatDate(c.lastSessionAt) : '—'],
-    ['Protocol since', c.protocolSince ? formatDate(c.protocolSince) : '—'],
+    [t('statSessions'), c.sessionsCount ?? 0],
+    [t('statLastSession'), c.lastSessionAt ? formatDate(c.lastSessionAt) : '—'],
+    [t('statProtocolSince'), c.protocolSince ? formatDate(c.protocolSince) : '—'],
   ];
   $('client-stats').innerHTML = cells.map(([k, v]) =>
-    `<div class="stat"><span class="stat__label">${k}</span><span class="stat__value">${escHtml(String(v))}</span></div>`).join('');
+    `<div class="stat"><span class="stat__label">${k}</span><span class="stat__value">${escHtml(typeof v === 'number' ? localizeNumber(v) : String(v))}</span></div>`).join('');
 }
 function renderClientDots(sessions) {
   const el = $('client-dots');
-  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions recorded for this client yet.</div>'; return; }
+  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('noSessionsRecordedClient'))}</div>`; return; }
   const maxDur = Math.max(...sessions.map(s => s.duration || 0), 1);
   el.innerHTML = sessions.slice().reverse().map(s => {
     const d = s.duration || 0, size = 14 + Math.round((d / maxDur) * 22);
-    return `<button class="timeline-dot" data-session-id="${s.id}" title="${escHtml(s.name)} · ${d ? formatDuration(d) : 'in progress'}" style="width:${size}px;height:${size}px"></button>`;
+    return `<button class="timeline-dot" data-session-id="${s.id}" title="${escHtml(s.name)} · ${d ? formatDuration(d) : t('inProgressLabel')}" style="width:${size}px;height:${size}px"></button>`;
   }).join('');
 }
 function renderClientSessions(sessions) {
   const el = $('client-sessions');
-  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
+  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('noSessionsYet'))}</div>`; return; }
   el.innerHTML = sessions.map(s =>
     `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${formatDate(s.startTime)} · ${s.duration ? formatDuration(s.duration) : '—'}</span></button>`).join('');
 }
 function renderClientReco(c) {
   const el = $('client-reco');
-  if (!c.protocol && !c.goal) { el.innerHTML = '<div class="empty-state">No protocol set. Use Edit to add one.</div>'; return; }
+  if (!c.protocol && !c.goal) { el.innerHTML = `<div class="empty-state">${escHtml(t('noProtocolSet'))}</div>`; return; }
   el.innerHTML = (c.protocol ? `<div class="reco__protocol">${escHtml(c.protocol)}</div>` : '') +
-    (c.goal ? `<div class="reco__goal">Goal: ${escHtml(c.goal)}</div>` : '');
+    (c.goal ? `<div class="reco__goal">${escHtml(t('goalPrefix'))}${escHtml(c.goal)}</div>` : '');
 }
 function renderClientNotes(c) {
   $('client-notes').innerHTML = c.notes && c.notes.trim()
     ? escHtml(c.notes).replace(/\n/g, '<br>')
-    : '<div class="empty-state">No notes yet.</div>';
+    : `<div class="empty-state">${escHtml(t('noNotesYet'))}</div>`;
 }
 
 // ── Add / edit / back actions ──
 $('btn-add-client').addEventListener('click', async () => {
-  const name = prompt('New client name:');
+  const name = prompt(t('newClientNamePrompt'));
   if (!name || !name.trim()) return;
   try {
     await api('POST', '/clients', { name: name.trim() });
-    showToast('Client added');
+    showToast(t('clientAddedToast'));
     loadClientOptions();
     onShowCohort();
   } catch (e) { showToast(e.message); }
@@ -3085,14 +3175,14 @@ $('btn-add-client').addEventListener('click', async () => {
 $('btn-back-cohort').addEventListener('click', () => showView('cohort'));
 $('btn-edit-client').addEventListener('click', async () => {
   if (!selectedClientId) return;
-  const protocol = prompt('Protocol (blank = keep current):');
+  const protocol = prompt(t('protocolPrompt'));
   if (protocol === null) return;
-  const notes = prompt('Teacher notes (blank = keep current):');
+  const notes = prompt(t('notesPrompt'));
   if (notes === null) return;
   const body = {};
   if (protocol !== '') body.protocol = protocol;
   if (notes !== '') body.notes = notes;
   if (!Object.keys(body).length) return;
-  try { await api('PUT', '/clients/' + selectedClientId, body); showToast('Saved'); onShowClient(); }
+  try { await api('PUT', '/clients/' + selectedClientId, body); showToast(t('toastSaved')); onShowClient(); }
   catch (e) { showToast(e.message); }
 });

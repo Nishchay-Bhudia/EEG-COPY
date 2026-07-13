@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EEG DEV TESTING</title>
+  <title data-i18n="brandName">EEG DEV TESTING</title>
   <link rel="stylesheet" href="style.css" />
   <style>
 /* ── Analytics Notes ─────────────────────────────────────────────────── */
@@ -155,7 +155,7 @@
     <div class="settings-section">
       <div class="settings-section-title" data-i18n="settingsBluetoothTitle">Bluetooth Headband</div>
       <button class="btn btn-secondary" id="btn-bt-scan" data-i18n="settingsBtScan">Scan &amp; Connect Headband</button>
-      <p class="settings-note">
+      <p class="settings-note" data-i18n="settingsBtNote">
         Works with Muse and BrainBit headbands; the driver layer makes adding
         other BLE headbands straightforward. Raw EEG is
         collected for 2&thinsp;s then sent to your Render backend for full
@@ -172,7 +172,7 @@
         <input class="field-input" id="input-backend-url" type="url"
                placeholder="https://your-app.onrender.com" />
       </div>
-      <p class="settings-note">
+      <p class="settings-note" data-i18n="settingsBackendNote">
         The backend must expose <code>POST /analyze</code> (raw EEG) and
         optionally <code>POST /analyze/bands</code> (pre-computed powers).
       </p>
@@ -1004,7 +1004,7 @@
     <!-- Step 3: Chat Interface -->
     <div id="ai-baba-step-chat" class="ai-baba-step ai-baba-step-chat" style="display:none">
       <div class="ai-baba-session-bar">
-        <span class="ai-baba-session-name" id="ai-baba-session-label">Session</span>
+        <span class="ai-baba-session-name" id="ai-baba-session-label" data-i18n="aiBabaSessionFallbackName">Session</span>
         <button class="ai-baba-change-session" id="btn-ai-baba-change" data-i18n="aiBabaChangeSession">↩ Change session</button>
       </div>
       <div class="ai-baba-messages" id="ai-baba-messages" role="log" aria-live="polite"></div>

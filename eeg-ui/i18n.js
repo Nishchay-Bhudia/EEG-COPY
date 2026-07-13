@@ -70,6 +70,8 @@ const I18N = {
     disconnect: 'Disconnect',
     connect: 'Connect',
     demo: 'Demo',
+    demoLabel: '▶ Demo',
+    stopDemoLabel: '⏹ Stop Demo',
     noClient: 'No client',
     startSession: 'Start Session',
     endSession: 'End Session',
@@ -203,6 +205,15 @@ const I18N = {
     timelineHint: 'Consecutive epochs in the same Chitta Bhumi state are grouped into phases.',
     sessionNotesTitle2: 'Session Notes',
     noNotesRecorded: 'No notes recorded for this session.',
+    noDataDot: 'No data.',
+    noPhaseDataDot: 'No phase data.',
+    noSvaraData: 'no svara data',
+    noDepthData: 'no depth data',
+    noBandData: 'no band data',
+    noGunaData: 'no guṇa data',
+    noDataLower: 'no data',
+    dominantSuffix: 'dominant',
+    bandDominantTemplate: '{band} dominant',
     epochReplayTitle: 'Epoch Replay',
     epochReplayHint: 'Step through recorded epochs to see how the EEG state evolved over time.',
     openInReplay: 'Open in Replay ↗',
@@ -280,6 +291,124 @@ const I18N = {
     concord_mixed: 'Mixed signals',
     concord_tension: 'Signals in tension',
     concord_inconclusive: 'Inconclusive',
+
+    // ── Alerts / confirms / prompts ──
+    alertEnterUrl: 'Enter a URL first.',
+    alertEnterPassword: 'Enter a password.',
+    alertPasswordUpdated: 'Password updated.',
+    alertErrorPrefix: 'Error: ',
+    confirmDeleteUser: 'Delete this user? This cannot be undone.',
+    confirmChangeRole: 'Change this user\'s role to "{role}"?',
+    alertFailedStartSession: 'Failed to start session: ',
+    alertWebBluetoothUnavailable: 'Web Bluetooth is not available. Please use Chrome or Edge on desktop.',
+    promptNewClientName: 'New client name:',
+    promptProtocol: 'Protocol (blank = keep current):',
+    promptTeacherNotes: 'Teacher notes (blank = keep current):',
+    promptSessionName: 'Session name:',
+    defaultNewSessionName: 'New Session',
+
+    // ── Login ──
+    signingIn: 'Signing in…',
+    loginFailed: 'Login failed',
+    usernamePasswordRequired: 'Username and password required.',
+    requestFailed: 'Request failed',
+
+    // ── Admin ──
+    noUsersFound: 'No users found.',
+    btnApply: 'Apply',
+    btnResetPw: 'Reset PW',
+    btnDelete: 'Delete',
+    youBadge: 'you',
+    btnViewAnalytics: 'View Analytics',
+    noSessionsYetAdmin: 'No sessions yet.',
+    activeLabel: 'active',
+
+    // ── Home / This Week ──
+    kpiClients: 'Clients',
+    kpiSessionsThisWeek: 'Sessions this week',
+    kpiNeedsAttention: 'Needs attention',
+    kpiTotalSessions: 'Total sessions',
+    allClientsOnTrack: 'All clients on track.',
+    noRecentSession: 'No recent session',
+    homeNoSessionsYet: 'No sessions yet.',
+    unknownClientLabel: 'Unknown client',
+    unassignedLabel: 'Unassigned',
+
+    // ── Cohort ──
+    cohortTitleWithCount: 'Cohort · {n} client{s}',
+    noClientsYetHint: 'No clients yet. Add your first client to start building a cohort.',
+    noSessionsYetLower: 'no sessions yet',
+    clientStatusPlateau: 'Plateau',
+    clientStatusProgress: 'Progress',
+    clientStatusIssue: 'Needs attention',
+    clientStatusNew: 'New',
+
+    // ── Client profile ──
+    couldNotLoadClient: 'Could not load client: ',
+    statSessions: 'Sessions',
+    statLastSession: 'Last session',
+    statProtocolSince: 'Protocol since',
+    noSessionsRecordedClient: 'No sessions recorded for this client yet.',
+    noProtocolSet: 'No protocol set. Use Edit to add one.',
+    goalPrefix: 'Goal: ',
+    noNotesYet: 'No notes yet.',
+    yrsSuffix: ' yrs',
+    monthsPracticingLt1: '<1 month practicing',
+    monthsPracticing: '{m} month{s} practicing',
+    yearsMonthsPracticing: '{y}y {m}m practicing',
+    inProgressLabel: 'in progress',
+    sessionCountTemplate: '{n} session{s}',
+
+    // ── Replay/Analyze ──
+    noSessionsOption: 'No sessions',
+    playLabel: '▶ Play',
+    pauseLabel: '⏸ Pause',
+    recordSessionFirstHint: 'Record a session first, then analyze it here.',
+    couldNotLoadSessions: 'Could not load sessions: ',
+    noEpochDataToAnalyze: 'This session has no epoch data to analyze.',
+    couldNotLoadAnalytics: 'Could not load analytics: ',
+    noEegDataRecorded: 'No EEG data recorded',
+    untitledSession: 'Untitled Session',
+    analyzeSessionMetaTemplate: '{epochs} epochs · {duration} · dominant: {dominant}',
+    replayViewMetaTemplate: '{epochs} epochs · {duration}',
+    dominantStateLabel: 'Dominant state',
+    dominantGunaLabel: 'Dominant guṇa',
+    avgSpo2Label: 'Avg SpO₂',
+    avgHrLabel: 'Avg HR',
+    epochsLabel: 'Epochs',
+
+    // ── AI Baba ──
+    aiBabaDefaultSummary: 'Here is a summary of your session.',
+    aiBabaTroubleLoading: 'Namaste 🙏 I had trouble loading your session data.',
+    aiBabaTryAgainDifferent: 'Please try again or select a different session.',
+    aiBabaCouldNotProcess: 'I could not process that. Please try again.',
+    unknownErrorLabel: 'Unknown error',
+    aiBabaSessionFallbackName: 'Session',
+    aiBabaEpochSingular: 'epoch',
+    aiBabaEpochPlural: 'epochs',
+    aiBabaFailedToLoadSessions: 'Failed to load sessions — ',
+    aiBabaUnknownErrorLower: 'unknown error',
+    aiBabaPleaseTryAgainSuffix: '. Please try again.',
+    aiBabaSomethingWentWrong: 'Something went wrong — ',
+    aiBabaErrorPrefix: '⚠️ Error: ',
+
+    // ── Misc toasts ──
+    clientAddedToast: 'Client added',
+    noCompatibleDriver: 'No compatible EEG driver for this device',
+    newClientNamePrompt: 'New client name:',
+    protocolPrompt: 'Protocol (blank = keep current):',
+    notesPrompt: 'Teacher notes (blank = keep current):',
+    sessionNamePrompt: 'Session name:',
+    webBluetoothUnavailable: 'Web Bluetooth is not available. Please use Chrome or Edge on desktop.',
+    failedToStartSessionPrefix: 'Failed to start session: ',
+    sessionDefaultPrefix: 'Session ',
+    newSessionFallbackName: 'New Session',
+
+    testingEllipsis: 'Testing…',
+    connectedBoardPrefix: '✓ Connected — board: ',
+    modelReadySuffix: ' | model ready',
+    modelLoadingSuffix: ' | model loading…',
+    connectionFailed: 'connection failed',
   },
 
   gu: {
@@ -328,6 +457,8 @@ const I18N = {
     disconnect: 'ડિસ્કનેક્ટ કરો',
     connect: 'જોડો',
     demo: 'ડેમો',
+    demoLabel: '▶ ડેમો',
+    stopDemoLabel: '⏹ ડેમો બંધ કરો',
     noClient: 'કોઈ ગ્રાહક નહીં',
     startSession: 'સેશન શરૂ કરો',
     endSession: 'સેશન સમાપ્ત કરો',
@@ -445,6 +576,15 @@ const I18N = {
     timelineHint: 'સમાન ચિત્ત ભૂમિ સ્થિતિમાં સતત એપોકને તબક્કાઓમાં જૂથબદ્ધ કરવામાં આવે છે.',
     sessionNotesTitle2: 'સેશન નોંધો',
     noNotesRecorded: 'આ સેશન માટે કોઈ નોંધ રેકોર્ડ કરવામાં આવી નથી.',
+    noDataDot: 'કોઈ ડેટા નથી.',
+    noPhaseDataDot: 'કોઈ તબક્કાનો ડેટા નથી.',
+    noSvaraData: 'સ્વર ડેટા નથી',
+    noDepthData: 'ઊંડાણનો ડેટા નથી',
+    noBandData: 'બેન્ડ ડેટા નથી',
+    noGunaData: 'ગુણ ડેટા નથી',
+    noDataLower: 'ડેટા નથી',
+    dominantSuffix: 'મુખ્ય',
+    bandDominantTemplate: '{band} મુખ્ય',
     epochReplayTitle: 'એપોક રિપ્લે',
     epochReplayHint: 'EEG સ્થિતિ સમય સાથે કેવી રીતે વિકસિત થઈ તે જોવા માટે રેકોર્ડ કરેલ એપોકમાંથી પસાર થાઓ.',
     openInReplay: 'રિપ્લેમાં ખોલો ↗',
@@ -512,6 +652,115 @@ const I18N = {
     concord_mixed: 'મિશ્ર સંકેતો',
     concord_tension: 'સંકેતોમાં તણાવ',
     concord_inconclusive: 'અનિર્ણિત',
+
+    alertEnterUrl: 'પહેલા URL દાખલ કરો.',
+    alertEnterPassword: 'પાસવર્ડ દાખલ કરો.',
+    alertPasswordUpdated: 'પાસવર્ડ અપડેટ થયો.',
+    alertErrorPrefix: 'ભૂલ: ',
+    confirmDeleteUser: 'આ વપરાશકર્તાને કાઢી નાખવો છે? આ પૂર્વવત્ કરી શકાશે નહીં.',
+    confirmChangeRole: 'આ વપરાશકર્તાની ભૂમિકા "{role}" માં બદલવી છે?',
+    alertFailedStartSession: 'સેશન શરૂ કરવામાં નિષ્ફળ: ',
+    alertWebBluetoothUnavailable: 'Web Bluetooth ઉપલબ્ધ નથી. કૃપા કરીને ડેસ્કટોપ પર Chrome અથવા Edge વાપરો.',
+    promptNewClientName: 'નવા ગ્રાહકનું નામ:',
+    promptProtocol: 'પ્રોટોકોલ (ખાલી = હાલનું રાખો):',
+    promptTeacherNotes: 'શિક્ષકની નોંધો (ખાલી = હાલનું રાખો):',
+    promptSessionName: 'સેશન નામ:',
+    defaultNewSessionName: 'નવું સેશન',
+
+    signingIn: 'સાઇન ઇન થઈ રહ્યું છે…',
+    loginFailed: 'લૉગિન નિષ્ફળ',
+    usernamePasswordRequired: 'વપરાશકર્તા નામ અને પાસવર્ડ જરૂરી છે.',
+    requestFailed: 'વિનંતી નિષ્ફળ',
+
+    noUsersFound: 'કોઈ વપરાશકર્તા મળ્યા નથી.',
+    btnApply: 'લાગુ કરો',
+    btnResetPw: 'PW રીસેટ કરો',
+    btnDelete: 'કાઢી નાખો',
+    youBadge: 'તમે',
+    btnViewAnalytics: 'વિશ્લેષણ જુઓ',
+    noSessionsYetAdmin: 'હજી કોઈ સેશન નથી.',
+    activeLabel: 'સક્રિય',
+
+    kpiClients: 'ગ્રાહકો',
+    kpiSessionsThisWeek: 'આ અઠવાડિયાના સેશન',
+    kpiNeedsAttention: 'ધ્યાન આપવાની જરૂર',
+    kpiTotalSessions: 'કુલ સેશન',
+    allClientsOnTrack: 'બધા ગ્રાહકો ટ્રેક પર છે.',
+    noRecentSession: 'તાજેતરમાં કોઈ સેશન નથી',
+    homeNoSessionsYet: 'હજી કોઈ સેશન નથી.',
+    unknownClientLabel: 'અજાણ્યો ગ્રાહક',
+    unassignedLabel: 'અસોંપાયેલ',
+
+    cohortTitleWithCount: 'જૂથ · {n} ગ્રાહક',
+    noClientsYetHint: 'હજી કોઈ ગ્રાહક નથી. જૂથ બનાવવાનું શરૂ કરવા માટે તમારો પ્રથમ ગ્રાહક ઉમેરો.',
+    noSessionsYetLower: 'હજી કોઈ સેશન નથી',
+    clientStatusPlateau: 'સ્થિર',
+    clientStatusProgress: 'પ્રગતિ',
+    clientStatusIssue: 'ધ્યાન આપવાની જરૂર',
+    clientStatusNew: 'નવું',
+
+    couldNotLoadClient: 'ગ્રાહક લોડ કરી શકાયો નથી: ',
+    statSessions: 'સેશન',
+    statLastSession: 'છેલ્લું સેશન',
+    statProtocolSince: 'પ્રોટોકોલ ક્યારથી',
+    noSessionsRecordedClient: 'આ ગ્રાહક માટે હજી કોઈ સેશન રેકોર્ડ કરવામાં આવ્યું નથી.',
+    noProtocolSet: 'કોઈ પ્રોટોકોલ સેટ નથી. ઉમેરવા માટે સંપાદિત કરો વાપરો.',
+    goalPrefix: 'ધ્યેય: ',
+    noNotesYet: 'હજી કોઈ નોંધ નથી.',
+    yrsSuffix: ' વર્ષ',
+    monthsPracticingLt1: '૧ મહિનાથી ઓછું અભ્યાસ',
+    monthsPracticing: '{m} મહિનાથી અભ્યાસ',
+    yearsMonthsPracticing: '{y} વર્ષ {m} મહિનાથી અભ્યાસ',
+    inProgressLabel: 'ચાલુ છે',
+    sessionCountTemplate: '{n} સેશન',
+
+    noSessionsOption: 'કોઈ સેશન નથી',
+    playLabel: '▶ ચલાવો',
+    pauseLabel: '⏸ થોભાવો',
+    recordSessionFirstHint: 'તેનું વિશ્લેષણ કરવા માટે પહેલા એક સેશન રેકોર્ડ કરો.',
+    couldNotLoadSessions: 'સેશન લોડ કરી શકાયા નથી: ',
+    noEpochDataToAnalyze: 'આ સેશન માટે વિશ્લેષણ કરવા કોઈ એપોક ડેટા નથી.',
+    couldNotLoadAnalytics: 'વિશ્લેષણ લોડ કરી શકાયું નથી: ',
+    noEegDataRecorded: 'કોઈ EEG ડેટા રેકોર્ડ થયો નથી',
+    untitledSession: 'શીર્ષક વિનાનું સેશન',
+    analyzeSessionMetaTemplate: '{epochs} એપોક · {duration} · મુખ્ય: {dominant}',
+    replayViewMetaTemplate: '{epochs} એપોક · {duration}',
+    dominantStateLabel: 'મુખ્ય સ્થિતિ',
+    dominantGunaLabel: 'મુખ્ય ગુણ',
+    avgSpo2Label: 'સરેરાશ SpO₂',
+    avgHrLabel: 'સરેરાશ હૃદય દર',
+    epochsLabel: 'એપોક',
+
+    aiBabaDefaultSummary: 'આ તમારા સેશનનો સારાંશ છે.',
+    aiBabaTroubleLoading: 'નમસ્તે 🙏 મને તમારો સેશન ડેટા લોડ કરવામાં તકલીફ પડી.',
+    aiBabaTryAgainDifferent: 'કૃપા કરીને ફરી પ્રયાસ કરો અથવા બીજું સેશન પસંદ કરો.',
+    aiBabaCouldNotProcess: 'હું તે સમજી શક્યો નહીં. કૃપા કરીને ફરી પ્રયાસ કરો.',
+    unknownErrorLabel: 'અજાણી ભૂલ',
+    aiBabaSessionFallbackName: 'સેશન',
+    aiBabaEpochSingular: 'એપોક',
+    aiBabaEpochPlural: 'એપોક',
+    aiBabaFailedToLoadSessions: 'સેશન લોડ કરવામાં નિષ્ફળ — ',
+    aiBabaUnknownErrorLower: 'અજાણી ભૂલ',
+    aiBabaPleaseTryAgainSuffix: '. કૃપા કરીને ફરી પ્રયાસ કરો.',
+    aiBabaSomethingWentWrong: 'કંઈક ખોટું થયું — ',
+    aiBabaErrorPrefix: '⚠️ ભૂલ: ',
+
+    clientAddedToast: 'ગ્રાહક ઉમેરાયો',
+    noCompatibleDriver: 'આ ડિવાઇસ માટે કોઈ સુસંગત EEG ડ્રાઇવર નથી',
+    newClientNamePrompt: 'નવા ગ્રાહકનું નામ:',
+    protocolPrompt: 'પ્રોટોકોલ (ખાલી = હાલનું રાખો):',
+    notesPrompt: 'શિક્ષક નોંધો (ખાલી = હાલનું રાખો):',
+    sessionNamePrompt: 'સેશનનું નામ:',
+    webBluetoothUnavailable: 'Web Bluetooth ઉપલબ્ધ નથી. કૃપા કરીને ડેસ્કટોપ પર Chrome અથવા Edge વાપરો.',
+    failedToStartSessionPrefix: 'સેશન શરૂ કરવામાં નિષ્ફળ: ',
+    sessionDefaultPrefix: 'સેશન ',
+    newSessionFallbackName: 'નવું સેશન',
+
+    testingEllipsis: 'ચકાસી રહ્યાં છીએ…',
+    connectedBoardPrefix: '✓ જોડાયેલ — બોર્ડ: ',
+    modelReadySuffix: ' | મોડેલ તૈયાર છે',
+    modelLoadingSuffix: ' | મોડેલ લોડ થઈ રહ્યું છે…',
+    connectionFailed: 'જોડાણ નિષ્ફળ',
   },
 };
 
@@ -528,6 +777,18 @@ function setLang(lang) {
 function t(key) {
   const lang = getLang();
   return (I18N[lang] && I18N[lang][key]) ?? I18N.en[key] ?? key;
+}
+
+// Template variant of t() — replaces {placeholder} tokens with values from
+// `params`. Used for strings with embedded counts/names (e.g. "Cohort · {n}
+// client{s}") where the surrounding words need to translate too, not just
+// the raw number.
+function tf(key, params) {
+  let s = t(key);
+  for (const [k, v] of Object.entries(params || {})) {
+    s = s.replaceAll('{' + k + '}', v);
+  }
+  return s;
 }
 
 // ── Identifier -> display-text translators ──────────────────────────────────
@@ -587,6 +848,68 @@ function translateTattvaFlag(flag) {
   return flag; // unrecognized template — leave as-is rather than guess
 }
 
+// ── Corroboration axis notes/readings ──
+// Fixed English sentences authored in the backend (VedanticAnalyzer.Corroborate)
+// and mirrored in app.js's DEMO_CORROB fixture. Neither source parameterizes
+// these by language, so we translate them client-side by exact-text lookup.
+const CORROB_NOTE_GU = {
+  'low complexity is consistent with tāmasic dullness': 'નીચી જટિલતા તામસિક જડતા સાથે સુસંગત છે',
+  'rich, structured signal — resembles resting awareness more than inertia': 'સમૃદ્ધ, સંરચિત સંકેત — જડતા કરતાં વિશ્રામી જાગૃતિ જેવું લાગે છે',
+  'richness is higher than a purely inert state would show': 'સંપૂર્ણ જડ સ્થિતિ કરતાં સમૃદ્ધિ વધારે છે',
+  'high, unpredictable complexity fits a scattered mind': 'ઊંચી, અણધારી જટિલતા વિખરાયેલા મન સાથે બંધબેસે છે',
+  'unusually ordered for a scattered state': 'વિખરાયેલી સ્થિતિ માટે અસામાન્ય રીતે વ્યવસ્થિત',
+  'mid-range complexity fits an oscillating mind': 'મધ્ય-શ્રેણીની જટિલતા ડોલતા મન સાથે બંધબેસે છે',
+  'retained complexity — genuine stillness, not drowsiness': 'જળવાયેલી જટિલતા — સાચી સ્થિરતા, ઊંઘ નહીં',
+  'low complexity resembles drowsiness (tāmasic Mudha), not absorption': 'નીચી જટિલતા ઊંઘ (તામસિક મૂઢ) જેવી લાગે છે, લીનતા નહીં',
+  'flat 1/f (cortical excitation) fits hyperarousal': 'સપાટ 1/f (કોર્ટિકલ ઉત્તેજના) અતિ-ઉત્તેજના સાથે બંધબેસે છે',
+  'a quiet cortical background is unexpected for agitation': 'શાંત કોર્ટિકલ પૃષ્ઠભૂમિ ઉશ્કેરાટ માટે અનપેક્ષિત છે',
+  'steep 1/f — a quiet, inhibition-weighted cortex': 'તીવ્ર 1/f — શાંત, અવરોધ-ભારિત કોર્ટેક્સ',
+  'an excitation-weighted background is unexpected for deep absorption': 'ઊંડી લીનતા માટે ઉત્તેજના-ભારિત પૃષ્ઠભૂમિ અનપેક્ષિત છે',
+  'steep 1/f fits low-arousal heaviness': 'તીવ્ર 1/f નીચી-ઉત્તેજના ભારેપણા સાથે બંધબેસે છે',
+  'elevated high-β chatter fits Kṣipta': 'ઊંચી high-β વાચાળતા ક્ષિપ્ત સાથે બંધબેસે છે',
+  'unusually quiet for a scattered state': 'વિખરાયેલી સ્થિતિ માટે અસામાન્ય રીતે શાંત',
+  'stilled fluctuations — citta-vṛtti-nirodha': 'શાંત થયેલી વધઘટ — ચિત્ત-વૃત્તિ-નિરોધ',
+  'active chatter is at odds with one-pointedness': 'સક્રિય વાચાળતા એકાગ્રતા સાથે વિરોધાભાસી છે',
+  'low chatter — though dullness and stillness both read low here': 'ઓછી વાચાળતા — જોકે અહીં જડતા અને સ્થિરતા બંને નીચા દેખાય છે',
+  'some restlessness fits an oscillating mind': 'થોડી અસ્વસ્થતા ડોલતા મન સાથે બંધબેસે છે',
+  'Fm-θ + α synchrony — the focused-attention absorption signature': 'Fm-θ + α સુમેળ — કેન્દ્રિત-ધ્યાન લીનતાની નિશાની',
+  'the one-pointed absorption signature is absent': 'એકાગ્ર લીનતાની નિશાની ગેરહાજર છે',
+  'effortless — the flow-like signature of dhyāna, not strained holding': 'સહજ — ધ્યાનની પ્રવાહ જેવી નિશાની, તાણયુક્ત પકડ નહીં',
+  'focus appears effortful — dhāraṇā-like holding rather than settled flow': 'ધ્યાન કેન્દ્રીકરણ પ્રયત્નશીલ લાગે છે — સ્થિર પ્રવાહને બદલે ધારણા જેવી પકડ',
+};
+const CORROB_CAVEAT_GU = {
+  'Low neural complexity resembles drowsiness (tāmasic Mudha) rather than genuine absorption.':
+    'નીચી ન્યુરલ જટિલતા સાચી લીનતાને બદલે ઊંઘ (તામસિક મૂઢ) જેવી લાગે છે.',
+  'The signal retains rich structure — this may be quiet resting awareness rather than inertia.':
+    'સંકેત સમૃદ્ધ સંરચના જાળવે છે — આ જડતાને બદલે શાંત વિશ્રામી જાગૃતિ હોઈ શકે છે.',
+  'Neuromarkers diverge from the śāstric reading.': 'ન્યુરોમાર્કર્સ શાસ્ત્રીય વાંચનથી અલગ પડે છે.',
+};
+const CORROB_LEVEL_GU = {
+  low: 'નીચી', moderate: 'મધ્યમ', high: 'ઊંચી',
+  flat: 'સપાટ', steep: 'તીવ્ર',
+  present: 'હાજર', absent: 'ગેરહાજર',
+  effortless: 'સહજ', effortful: 'પ્રયત્નશીલ',
+};
+function translateCorrobNote(note) {
+  if (!note || getLang() !== 'gu') return note;
+  return CORROB_NOTE_GU[note] || note;
+}
+function translateCorrobCaveat(caveat) {
+  if (!caveat || getLang() !== 'gu') return caveat;
+  return CORROB_CAVEAT_GU[caveat] || caveat;
+}
+function translateCorrobReading(reading) {
+  if (!reading || getLang() !== 'gu') return reading;
+  if (CORROB_LEVEL_GU[reading]) return CORROB_LEVEL_GU[reading];
+  let m = reading.match(/^(low|moderate|high) richness \(([\d.]+)\)$/);
+  if (m) return `${CORROB_LEVEL_GU[m[1]]} સમૃદ્ધિ (${toGujaratiDigits(m[2])})`;
+  m = reading.match(/^(flat|moderate|steep) 1\/f slope \(exponent ([\d.]+)\)$/);
+  if (m) return `${CORROB_LEVEL_GU[m[1]]} 1/f ઢાળ (એક્સપોનન્ટ ${toGujaratiDigits(m[2])})`;
+  m = reading.match(/^(low|moderate|high) vṛtti \(([\d.]+)\)$/);
+  if (m) return `${CORROB_LEVEL_GU[m[1]]} વૃત્તિ (${toGujaratiDigits(m[2])})`;
+  return reading; // unrecognized template — leave as-is rather than guess
+}
+
 function applyI18n() {
   const lang = getLang();
   const dict = I18N[lang] || I18N.en;
@@ -613,8 +936,13 @@ function applyI18n() {
 // every displayed figure (percentages, BPM, counts, ms) follows the language
 // choice, not just labels.
 const GUJARATI_DIGITS = ['૦', '૧', '૨', '૩', '૪', '૫', '૬', '૭', '૮', '૯'];
+const LATIN_DIGITS_RE = /[0-9]/g;
+const GUJARATI_DIGITS_RE = /[૦૧૨૩૪૫૬૭૮૯]/g;
 function toGujaratiDigits(str) {
-  return String(str).replace(/[0-9]/g, d => GUJARATI_DIGITS[+d]);
+  return String(str).replace(LATIN_DIGITS_RE, d => GUJARATI_DIGITS[+d]);
+}
+function toLatinDigits(str) {
+  return String(str).replace(GUJARATI_DIGITS_RE, d => String(GUJARATI_DIGITS.indexOf(d)));
 }
 // Localizes a number/numeric-string for display: formats then swaps digits
 // if Gujarati is active. Use this instead of raw .toFixed()/String() at any
@@ -625,29 +953,37 @@ function localizeNumber(value) {
 }
 
 // Sweeps every text node under `root` (default: whole page) and swaps digits
-// to Gujarati numerals when that's the active language. This is the one
-// mechanism covering every number in the app (percentages, ms, BPM, counts,
-// SVG chart labels) instead of hand-wrapping each individual render site —
-// call it after any render that might have written new numeric text
-// (applyReading, admin/analytics tables, replay, analyze SVG draws). A no-op
-// in English, and safe everywhere: only literal 0-9 characters are touched,
-// and no UI string in this app contains digits as anything but a number.
+// to match the active language — Gujarati numerals when Gujarati is active,
+// or back to Latin digits when English is active. This is the one mechanism
+// covering every number in the app (percentages, ms, BPM, counts, SVG chart
+// labels, and static HTML that's never re-rendered) instead of hand-wrapping
+// each individual render site — call it after any render that might have
+// written new numeric text (applyReading, admin/analytics tables, replay,
+// analyze SVG draws). Bidirectional so switching back to English restores
+// Latin digits even in content that's only ever swept, never re-rendered
+// from source data. Safe everywhere: only literal digit characters are
+// touched, and no UI string in this app contains digits as anything but a
+// number.
 function localizeDom(root) {
-  if (getLang() !== 'gu') return;
   const target = root || document.body;
   if (!target || typeof document === 'undefined' || !document.createTreeWalker) return;
+  const toGu = getLang() === 'gu';
+  const re = toGu ? LATIN_DIGITS_RE : GUJARATI_DIGITS_RE;
+  const convert = toGu ? toGujaratiDigits : toLatinDigits;
   const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
   const nodes = [];
   let n;
   while ((n = walker.nextNode())) nodes.push(n);
   for (const node of nodes) {
-    if (/[0-9]/.test(node.nodeValue)) node.nodeValue = toGujaratiDigits(node.nodeValue);
+    if (re.test(node.nodeValue)) node.nodeValue = convert(node.nodeValue);
+    re.lastIndex = 0;
   }
 }
 
 if (typeof window !== 'undefined') {
   window.I18N = I18N;
   window.t = t;
+  window.tf = tf;
   window.getLang = getLang;
   window.setLang = setLang;
   window.applyI18n = applyI18n;
@@ -661,4 +997,7 @@ if (typeof window !== 'undefined') {
   window.translateNirodha = translateNirodha;
   window.translateGunaLabel = translateGunaLabel;
   window.translateTattvaFlag = translateTattvaFlag;
+  window.translateCorrobNote = translateCorrobNote;
+  window.translateCorrobCaveat = translateCorrobCaveat;
+  window.translateCorrobReading = translateCorrobReading;
 }
