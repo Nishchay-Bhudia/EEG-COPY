@@ -816,6 +816,160 @@ async function loadAnalyticsNotes(sessionId) {
   }
 }
 
+// ── Session export (.txt) — full per-epoch data for offline classifier
+// calibration. Kept deliberately in plain, untranslated, consistently-
+// formatted terms regardless of UI language (this is meant to be read by a
+// person doing careful analysis across states/features, not displayed in the
+// app), and includes a blank line per epoch for the user to hand-annotate
+// what they were actually doing/experiencing before feeding the file back in.
+function fmtExportNum(v, digits) {
+  return (v == null || v === '' || isNaN(v)) ? '—' : Number(v).toFixed(digits ?? 3);
+}
+
+// Chitta Bhumi probabilities are inconsistently shaped across the three
+// analysis paths — demo and the backend-relay path send raw 0-1 floats,
+// the local-FFT fallback sends pre-formatted "82.4%" strings. Normalize
+// both into the same percentage display rather than let fmtExportNum
+// silently blank out the already-formatted strings (Number("82.4%") is NaN).
+function fmtExportProb(v) {
+  if (v == null || v === '') return '—';
+  if (typeof v === 'string') return v.includes('%') ? v : (isNaN(Number(v)) ? v : (Number(v) * 100).toFixed(1) + '%');
+  const n = Number(v);
+  return isNaN(n) ? '—' : (n * 100).toFixed(1) + '%';
+}
+
+function buildSessionExportTxt(sessionName, epochs, notes) {
+  const lines = [];
+  const sep = '='.repeat(78);
+  const dash = '-'.repeat(78);
+
+  lines.push(sep);
+  lines.push('SESSION EXPORT: ' + sessionName);
+  lines.push('Exported: ' + new Date().toLocaleString());
+  lines.push('Total epochs: ' + epochs.length);
+  lines.push(sep);
+  lines.push('');
+  lines.push('SESSION NOTES:');
+  lines.push(notes && notes.trim() ? notes.trim() : '(none)');
+  lines.push('');
+  lines.push(sep);
+  lines.push('EPOCH-BY-EPOCH DATA');
+  lines.push('Each epoch below has a blank "MY NOTES" line at the end — fill in what');
+  lines.push('you actually experienced/were doing during that epoch, then paste this');
+  lines.push('whole file back for classifier calibration analysis.');
+  lines.push(sep);
+
+  for (const ep of epochs) {
+    lines.push('');
+    lines.push(dash);
+    const elapsed = ep.elapsedSeconds != null ? formatTime(ep.elapsedSeconds) : '—';
+    lines.push(`EPOCH ${ep.epochNum}  |  t=+${elapsed}  |  recorded ${formatDate(ep.recordedAt)}  |  source: ${ep.dataQuality || '—'}`);
+    lines.push(dash);
+
+    lines.push('');
+    lines.push('CHITTA BHUMI');
+    lines.push(`  State: ${ep.chittaBhumi || '—'}   Confidence: ${ep.chittaConfidence || '—'}   Depth: ${ep.contemplativeDepth || '—'}`);
+    const probEntries = ep.probabilities && typeof ep.probabilities === 'object' ? Object.entries(ep.probabilities) : [];
+    lines.push('  Full probabilities: ' + (probEntries.length ? probEntries.map(([k, v]) => `${k}=${fmtExportProb(v)}`).join('  ') : '—'));
+
+    lines.push('');
+    lines.push('SWARA NADI');
+    lines.push(`  State: ${ep.swara || '—'}   Confidence: ${ep.swaraConfidence || '—'}`);
+    if (ep.swaraNote) lines.push(`  Note: ${ep.swaraNote}`);
+
+    lines.push('');
+    lines.push('TRIGUNAS');
+    lines.push(`  Sattva=${fmtExportNum(ep.gunas?.sattva)}  Rajas=${fmtExportNum(ep.gunas?.rajas)}  Tamas=${fmtExportNum(ep.gunas?.tamas)}  Label=${ep.gunas?.label || '—'}`);
+
+    lines.push('');
+    lines.push('BAND POWERS (relative, 0-1)');
+    lines.push(`  Delta=${fmtExportNum(ep.bands?.delta)}  Theta=${fmtExportNum(ep.bands?.theta)}  Alpha=${fmtExportNum(ep.bands?.alpha)}  LowBeta=${fmtExportNum(ep.lowBetaPower)}  HighBeta=${fmtExportNum(ep.highBetaPower)}  Beta(combined)=${fmtExportNum(ep.bands?.beta)}  Gamma=${fmtExportNum(ep.bands?.gamma)}`);
+
+    lines.push('');
+    lines.push('KEY DISCRIMINATING FEATURES');
+    lines.push(`  FAA (frontal alpha asymmetry): ${fmtExportNum(ep.faa)}`);
+    lines.push(`  PLV (phase-locking / coherence): ${fmtExportNum(ep.plv)}`);
+    lines.push(`  Vritti index: ${fmtExportNum(ep.vrittiIndex)}   Nirodha state: ${ep.nirodhaState || '—'}`);
+
+    if (ep.complexity) {
+      lines.push('');
+      lines.push('COMPLEXITY / INNER TEXTURE');
+      lines.push(`  LZiv=${fmtExportNum(ep.complexity.lziv)}  HiguchiFD=${fmtExportNum(ep.complexity.higuchiFd)}  SampleEntropy=${fmtExportNum(ep.complexity.sampleEntropy)}  PermEntropy=${fmtExportNum(ep.complexity.permEntropy)}`);
+    }
+    if (ep.aperiodic) {
+      lines.push(`  Aperiodic: exponent=${fmtExportNum(ep.aperiodic.exponent)}  offset=${fmtExportNum(ep.aperiodic.offset)}`);
+    }
+
+    lines.push('');
+    lines.push('TATTVA FLAGS');
+    lines.push('  ' + ((ep.tattvaFlags && ep.tattvaFlags.length) ? ep.tattvaFlags.join(', ') : '(none)'));
+
+    if (ep.corroboration && ep.corroboration.axes && ep.corroboration.axes.length) {
+      lines.push('');
+      lines.push('CORROBORATION (what the signals say)');
+      lines.push(`  Overall: ${ep.corroboration.concord || '—'}${ep.corroboration.indeterminate ? ' (indeterminate)' : ''}`);
+      for (const ax of ep.corroboration.axes) {
+        const agree = ax.agrees === true ? 'agrees' : ax.agrees === false ? 'disagrees' : 'neutral';
+        lines.push(`  - ${ax.axis}: ${ax.reading} (${agree})${ax.note ? ' — ' + ax.note : ''}`);
+      }
+      if (ep.corroboration.caveat) lines.push(`  Caveat: ${ep.corroboration.caveat}`);
+    }
+
+    if (ep.heartRate != null || ep.bloodOxygen != null) {
+      lines.push('');
+      lines.push('VITALS');
+      lines.push(`  Heart rate: ${ep.heartRate != null ? ep.heartRate + ' bpm' : '—'}   SpO2: ${ep.bloodOxygen != null ? ep.bloodOxygen + '%' : '—'}`);
+    }
+
+    lines.push('');
+    lines.push('MY NOTES FOR THIS EPOCH: ______________________________________________');
+  }
+
+  lines.push('');
+  lines.push(sep);
+  lines.push('END OF EXPORT');
+  lines.push(sep);
+
+  return lines.join('\n');
+}
+
+function downloadTextFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function exportSessionAsTxt() {
+  const sessionId = currentAnalyticsSessionId;
+  if (!sessionId) return;
+  const btn = $('btn-export-session');
+  const originalLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = t('exportingEllipsis'); }
+  try {
+    const [epochs, notesData] = await Promise.all([
+      api('GET', '/sessions/' + sessionId + '/epochs'),
+      api('GET', '/sessions/' + sessionId + '/notes').catch(() => ({ content: '' })),
+    ]);
+    const sessionName = (($('analytics-session-name') && $('analytics-session-name').textContent) || 'Session').trim();
+    const txt = buildSessionExportTxt(sessionName, epochs, notesData?.content || '');
+    const safeName = sessionName.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60) || 'session';
+    downloadTextFile(safeName + '_export.txt', txt);
+  } catch (err) {
+    showToast(t('exportFailedPrefix') + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
+}
+
+const btnExportSession = $('btn-export-session');
+if (btnExportSession) btnExportSession.addEventListener('click', exportSessionAsTxt);
+
 // ── Replay Player ─────────────────────────────────────────────────────────────
 $('replay-prev').addEventListener('click', () => { updateReplayDisplay(replayIndex - 1); });
 $('replay-next').addEventListener('click', () => { updateReplayDisplay(replayIndex + 1); });
@@ -1171,6 +1325,19 @@ function storeEpochToSession(r) {
       exponent: r.aperiodic.exponent ?? null,
       offset: r.aperiodic.offset ?? null,
     } : null,
+    // Full-fidelity fields for offline classifier calibration — all of these
+    // were already computed live in the reading object but silently dropped
+    // here before now, so Replay/Analyze and any future export only ever saw
+    // the winning state, never the full picture behind it.
+    probabilities: ch.probabilities || null,
+    corroboration: ch.corroboration || null,
+    faa: r.faa ?? null,
+    plv: r.connectivity?.plv ?? null,
+    lowBetaPower: spectrum.low_beta ?? null,
+    highBetaPower: spectrum.high_beta ?? null,
+    dataQuality: r.data_quality || null,
+    swaraNote: sw.note || null,
+    latencyMs: r.latency_ms ?? null,
   };
 
   api('POST', '/sessions/' + activeSession.id + '/epoch', epochBody)
@@ -1330,6 +1497,13 @@ function classifyLocal(bp, faa, plv) {
     band_powers: { relative: bp },
     eeg_spectrum: bp,
     alpha_asymmetry: asym,
+    // DO NOT TOUCH note above applies to alpha_asymmetry (drives the swara
+    // display/asym-thumb, deliberately the jittered value) — `faa` is a
+    // separate field carrying the REAL per-channel asymmetry already used
+    // for the actual guna/vritti math above, kept distinct so epoch export
+    // gets accurate data without changing anything about the swara display.
+    faa,
+    connectivity: { plv },
     tattva_flags: tattva,
     contemplative_depth: depth,
     gunas,
@@ -1478,6 +1652,7 @@ $('btn-demo').addEventListener('click', () => {
       band_powers:  { relative: bp },
       eeg_spectrum: bp,
       alpha_asymmetry: faa,
+      faa,
       tattva_flags: tattva,
       contemplative_depth: depth,
       gunas,
@@ -1811,6 +1986,7 @@ async function processBluetoothEEG() {
         contemplative_depth: data.chitta_bhumi?.depth || data.depth || '—',
         // Use hemispheric asymmetry from backend if available
         alpha_asymmetry: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? 0,
+        faa: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? null,
         // Backend returns eeg_spectrum or band_relative
         eeg_spectrum: data.eeg_spectrum || data.band_relative || null,
         gunas: data.gunas || null,

@@ -206,6 +206,15 @@ const mapEpoch = r => ({
     exponent: parseFloat(r.aperiodic_exponent),
     offset: parseFloat(r.aperiodic_offset),
   } : null,
+  probabilities: r.probabilities || null,
+  corroboration: r.corroboration || null,
+  faa: r.faa != null ? parseFloat(r.faa) : null,
+  plv: r.plv != null ? parseFloat(r.plv) : null,
+  lowBetaPower: r.low_beta_power != null ? parseFloat(r.low_beta_power) : null,
+  highBetaPower: r.high_beta_power != null ? parseFloat(r.high_beta_power) : null,
+  dataQuality: r.data_quality || null,
+  swaraNote: r.swara_note || null,
+  latencyMs: r.latency_ms != null ? parseFloat(r.latency_ms) : null,
 });
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -883,7 +892,9 @@ router.post('/sessions/:id/epoch', requireAuth, async (req, res) => {
          tattva_flags, blood_oxygen, heart_rate,
          vritti_index, nirodha_state,
          complexity_lziv, complexity_higuchi_fd, complexity_sample_entropy, complexity_perm_entropy,
-         aperiodic_exponent, aperiodic_offset
+         aperiodic_exponent, aperiodic_offset,
+         probabilities, corroboration, faa, plv,
+         low_beta_power, high_beta_power, data_quality, swara_note, latency_ms
        ) VALUES (
          $1, $2, NOW(), $3,
          $4, $5, $6,
@@ -893,7 +904,9 @@ router.post('/sessions/:id/epoch', requireAuth, async (req, res) => {
          $18, $19, $20,
          $21, $22,
          $23, $24, $25, $26,
-         $27, $28
+         $27, $28,
+         $29, $30, $31, $32,
+         $33, $34, $35, $36, $37
        )`,
       [
         sessionId, b.epochNum, b.elapsedSeconds,
@@ -905,6 +918,10 @@ router.post('/sessions/:id/epoch', requireAuth, async (req, res) => {
         b.vrittiIndex, b.nirodhaState,
         b.complexity?.lziv, b.complexity?.higuchiFd, b.complexity?.sampleEntropy, b.complexity?.permEntropy,
         b.aperiodic?.exponent, b.aperiodic?.offset,
+        b.probabilities ? JSON.stringify(b.probabilities) : null,
+        b.corroboration ? JSON.stringify(b.corroboration) : null,
+        b.faa, b.plv,
+        b.lowBetaPower, b.highBetaPower, b.dataQuality, b.swaraNote, b.latencyMs,
       ]
     );
     res.status(201).json({ ok: true });

@@ -104,7 +104,19 @@ CREATE TABLE IF NOT EXISTS eeg_epochs (
   complexity_sample_entropy NUMERIC(6,4),
   complexity_perm_entropy   NUMERIC(6,4),
   aperiodic_exponent     NUMERIC(6,4),
-  aperiodic_offset       NUMERIC(6,4)
+  aperiodic_offset       NUMERIC(6,4),
+
+  -- Full-fidelity capture for offline classifier calibration — see the
+  -- ALTER TABLE block below for the migration path on existing databases.
+  probabilities        JSONB,
+  corroboration         JSONB,
+  faa                    NUMERIC(6,4),
+  plv                    NUMERIC(6,4),
+  low_beta_power         NUMERIC(8,6),
+  high_beta_power        NUMERIC(8,6),
+  data_quality           TEXT,
+  swara_note             TEXT,
+  latency_ms             NUMERIC(8,2)
 );
 
 ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS vritti_index NUMERIC(6,4);
@@ -115,6 +127,21 @@ ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_sample_entropy NUMERI
 ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS complexity_perm_entropy NUMERIC(6,4);
 ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS aperiodic_exponent NUMERIC(6,4);
 ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS aperiodic_offset NUMERIC(6,4);
+
+-- Full-fidelity epoch capture for offline classifier calibration (export as
+-- .txt from the Session Analytics view, paste alongside your own notes on
+-- what you were actually doing per epoch). These were all already computed
+-- live in the reading object but silently dropped before now — nothing here
+-- changes what's classified or displayed, only what's persisted.
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS probabilities JSONB;      -- full Chitta Bhumi state -> probability map, not just the winner
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS corroboration JSONB;     -- the "what the signals say" axis-by-axis verdict, when available
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS faa NUMERIC(6,4);        -- frontal alpha asymmetry (hemispheric)
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS plv NUMERIC(6,4);        -- phase-locking value (coherence)
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS low_beta_power NUMERIC(8,6);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS high_beta_power NUMERIC(8,6);
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS data_quality TEXT;       -- which pipeline produced this epoch: demo | local FFT | BLE -> backend | replay
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS swara_note TEXT;
+ALTER TABLE eeg_epochs ADD COLUMN IF NOT EXISTS latency_ms NUMERIC(8,2);
 
 CREATE INDEX IF NOT EXISTS idx_epoch_session ON eeg_epochs (session_id, epoch_num);
 

@@ -194,6 +194,9 @@ const I18N = {
 
     // ── Analytics modal ──
     sessionAnalyticsTitle: 'Session Analytics',
+    exportSessionTxt: '⬇ Export TXT',
+    exportingEllipsis: 'Exporting…',
+    exportFailedPrefix: 'Export failed: ',
     close: '✕ Close',
     loadingSessionData: 'Loading session data…',
     statEpochs: 'Epochs', statDuration: 'Duration', statDominantGuna: 'Dominant Guna',
@@ -566,6 +569,9 @@ const I18N = {
     colDuration: 'સમયગાળો', colEpochs: 'એપોક',
 
     sessionAnalyticsTitle: 'સેશન વિશ્લેષણ',
+    exportSessionTxt: '⬇ TXT એક્સપોર્ટ કરો',
+    exportingEllipsis: 'એક્સપોર્ટ થઈ રહ્યું છે…',
+    exportFailedPrefix: 'એક્સપોર્ટ નિષ્ફળ: ',
     close: '✕ બંધ કરો',
     loadingSessionData: 'સેશન ડેટા લોડ થઈ રહ્યો છે…',
     statEpochs: 'એપોક', statDuration: 'સમયગાળો', statDominantGuna: 'મુખ્ય ગુણ',
