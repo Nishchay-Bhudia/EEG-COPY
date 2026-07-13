@@ -1897,9 +1897,16 @@ function onBtDisconnected() {
 // recompute) don't require better hardware — they make the estimate honest
 // about what a noisy signal actually supports.
 let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
+let lastValidHrAt = 0, lastValidSpo2At = 0;
 const PPG_RECOMPUTE_MS = 1000; // real HR doesn't need updating faster than 1/s
+// If the signal hasn't produced a single valid reading in this long, the old
+// EMA no longer means anything (e.g. good contact at the start of a session,
+// then the band shifts) — stop showing it as if it were still live. Matches
+// the analysis window itself: if 8s of fresh data can't confirm a reading,
+// there's no basis to keep displaying an older one.
+const PPG_STALE_MS = 8000;
 
-function resetPpgSmoothing() { hrEma = null; spo2Ema = null; lastPpgComputeAt = 0; }
+function resetPpgSmoothing() { hrEma = null; spo2Ema = null; lastPpgComputeAt = 0; lastValidHrAt = 0; lastValidSpo2At = 0; }
 
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
@@ -1914,19 +1921,29 @@ function onMusePPG(ev, channel) {
   if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
     lastPpgComputeAt = now;
     const rawHr = computeHeartRate(ppgBuf.ir);
-    if (rawHr != null) hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+    if (rawHr != null) {
+      hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+      lastValidHrAt = now;
+    } else if (hrEma != null && now - lastValidHrAt > PPG_STALE_MS) {
+      hrEma = null;
+    }
     latestHeartRate = hrEma;
 
     if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) {
       const rawSpo2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
-      if (rawSpo2 != null) spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+      if (rawSpo2 != null) {
+        spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+        lastValidSpo2At = now;
+      } else if (spo2Ema != null && now - lastValidSpo2At > PPG_STALE_MS) {
+        spo2Ema = null;
+      }
       latestSpO2 = spo2Ema;
     }
 
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl && latestHeartRate != null) { hrEl.textContent = localizeNumber(latestHeartRate.toFixed(0)); if (hrSt) hrSt.textContent = t('liveReading'); }
-    if (spo2El && latestSpO2 != null)   { spo2El.textContent = localizeNumber(latestSpO2.toFixed(1));   if (spo2St) spo2St.textContent = t('liveReading'); }
+    if (hrEl)  { hrEl.textContent  = latestHeartRate != null ? localizeNumber(latestHeartRate.toFixed(0)) : '—'; if (hrSt)  hrSt.textContent  = latestHeartRate != null ? t('liveReading') : t('awaitingSignal'); }
+    if (spo2El){ spo2El.textContent = latestSpO2 != null      ? localizeNumber(latestSpO2.toFixed(1))      : '—'; if (spo2St) spo2St.textContent = latestSpO2 != null      ? t('liveReading') : t('awaitingSignal'); }
   }
 }
 
