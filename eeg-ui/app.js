@@ -1542,11 +1542,18 @@ function pushSamples(ch, samples) {
   bleChannels[ch].push(...samples);
   bleSamTick += samples.length;
 
-  const buf = Math.min(bleChannels[0].length, COLLECT_N);
+  // Each channel is pushed to independently as its own BLE notifications
+  // arrive, so channels don't necessarily fill at the same rate. Gate on the
+  // SLOWEST channel (not just channel 0) — triggering as soon as channel 0
+  // alone reached COLLECT_N let processBluetoothEEG() snapshot the other
+  // channels while they were still short, producing mismatched channel
+  // lengths that the backend correctly rejects with a 400.
+  const minLen = Math.min(...bleChannels.map(c => c.length));
+  const buf = Math.min(minLen, COLLECT_N);
   const bufEl = $('val-buffer');
   if (bufEl) bufEl.textContent = buf + ' / ' + COLLECT_N;
 
-  if (bleChannels[0].length >= COLLECT_N) processBluetoothEEG();
+  if (minLen >= COLLECT_N) processBluetoothEEG();
 }
 
 const MuseDriver = {
