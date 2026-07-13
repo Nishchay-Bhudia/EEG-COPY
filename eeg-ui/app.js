@@ -1898,15 +1898,6 @@ function onBtDisconnected() {
 // about what a noisy signal actually supports.
 let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
 let lastValidHrAt = 0, lastValidSpo2At = 0;
-// A single bad window (motion, brief poor contact) shouldn't be able to yank
-// the displayed number by itself — hold it as a "candidate" and only fold it
-// into the EMA once the *next* window agrees with it too. A genuine change
-// (HR actually rising/falling) is sustained across consecutive ~1s windows
-// and gets confirmed almost immediately; a one-off artifact isn't and gets
-// silently dropped instead of ever reaching the screen.
-let pendingHrCandidate = null;
-const HR_JUMP_BPM = 20;         // single-window change bigger than this needs confirmation
-const HR_JUMP_CONFIRM_TOL = 10; // how close the next window must land to confirm it
 const PPG_RECOMPUTE_MS = 1000;  // real HR doesn't need updating faster than 1/s
 // If nothing's been confirmed in this long, the number on screen is no
 // longer "live" — but per explicit feedback, don't blank it out either
@@ -1917,10 +1908,18 @@ const PPG_STALE_MS = 8000;
 
 function resetPpgSmoothing() {
   hrEma = null; spo2Ema = null; lastPpgComputeAt = 0;
-  lastValidHrAt = 0; lastValidSpo2At = 0; pendingHrCandidate = null;
+  lastValidHrAt = 0; lastValidSpo2At = 0;
 }
 function isHrStale()   { return hrEma == null   || performance.now() - lastValidHrAt   > PPG_STALE_MS; }
 function isSpo2Stale() { return spo2Ema == null || performance.now() - lastValidSpo2At > PPG_STALE_MS; }
+
+// Temporary diagnostic logging — REMOVE once the real-device mismatch is
+// understood. Surfaces exactly what computeHeartRate() saw on each window
+// (peak count, candidate RR, autocorrelation score, resulting BPM) so a
+// real Muse S trace can be compared against the synthetic models used to
+// design/validate the algorithm, which have so far failed to reproduce the
+// specific ~126-136bpm-vs-78-80bpm-true mismatch reported on real hardware.
+const HR_DEBUG = true;
 
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
@@ -1934,22 +1933,10 @@ function onMusePPG(ev, channel) {
   const now = performance.now();
   if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
     lastPpgComputeAt = now;
-    const rawHr = computeHeartRate(ppgBuf.ir);
+    const rawHr = HR_DEBUG ? computeHeartRateDebug(ppgBuf.ir) : computeHeartRate(ppgBuf.ir);
     if (rawHr != null) {
-      if (hrEma == null || Math.abs(rawHr - hrEma) <= HR_JUMP_BPM) {
-        hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
-        lastValidHrAt = now;
-        pendingHrCandidate = null;
-      } else if (pendingHrCandidate != null && Math.abs(rawHr - pendingHrCandidate) <= HR_JUMP_CONFIRM_TOL) {
-        // Two consecutive windows agree on the jump — treat it as real.
-        hrEma = hrEma + 0.3 * (rawHr - hrEma);
-        lastValidHrAt = now;
-        pendingHrCandidate = null;
-      } else {
-        pendingHrCandidate = rawHr; // hold — see if the next window confirms it
-      }
-    } else {
-      pendingHrCandidate = null;
+      hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+      lastValidHrAt = now;
     }
     latestHeartRate = hrEma;
 
@@ -2050,6 +2037,73 @@ function computeHeartRate(signal) {
 
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
   return (hr >= 35 && hr <= 160) ? hr : null;
+}
+
+/** Verbatim copy of computeHeartRate() with console.log diagnostics at every
+ * stage/rejection point — TEMPORARY, for chasing a real-device mismatch that
+ * synthetic test signals haven't reproduced. Remove once resolved. */
+function computeHeartRateDebug(signal) {
+  const tag = '[HR]';
+  if (signal.length < PPG_SAMPLE_RATE * 2) { console.log(tag, 'too short:', signal.length); return null; }
+
+  const baseWin = PPG_SAMPLE_RATE;
+  const ac = new Array(signal.length);
+  let baseSum = 0;
+  for (let i = 0; i < signal.length; i++) {
+    baseSum += signal[i];
+    if (i >= baseWin) baseSum -= signal[i - baseWin];
+    const baseline = baseSum / Math.min(i + 1, baseWin);
+    ac[i] = signal[i] - baseline;
+  }
+  const sm = new Array(ac.length);
+  for (let i = 0; i < ac.length; i++) {
+    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
+    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
+  }
+
+  const rawMin = Math.min(...signal), rawMax = Math.max(...signal);
+  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
+  console.log(tag, `rawRange=[${rawMin},${rawMax}] detrendedStd=${std.toFixed(1)}`);
+
+  const thr = std * 0.5;
+  const minDist = Math.round(PPG_SAMPLE_RATE * 0.4);
+  const peaks = []; let lastPeak = -minDist;
+  for (let i = 1; i < sm.length - 1; i++) {
+    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
+      peaks.push(i); lastPeak = i;
+    }
+  }
+  console.log(tag, `peaks=${peaks.length} positions=[${peaks.join(',')}] heights=[${peaks.map(p => sm[p].toFixed(0)).join(',')}]`);
+  if (peaks.length < 6) { console.log(tag, 'REJECT: too few peaks'); return null; }
+
+  const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
+  const sortedRr = [...rrs].sort((a, b) => a - b);
+  const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+  const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+  console.log(tag, `rrs(samples)=[${rrs.join(',')}] median=${medianRr} kept=[${kept.join(',')}]`);
+  if (kept.length < 4) { console.log(tag, 'REJECT: too few kept RRs'); return null; }
+
+  const meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+  const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+  const cv = rrStd / meanRR;
+  console.log(tag, `meanRR=${meanRR.toFixed(2)}samples cv=${cv.toFixed(3)} -> naiveHr=${(60 * PPG_SAMPLE_RATE / meanRR).toFixed(1)}`);
+  if (cv > 0.18) { console.log(tag, 'REJECT: cv too high'); return null; }
+
+  const lag = Math.round(meanRR);
+  if (lag < 1 || lag >= sm.length) { console.log(tag, 'REJECT: bad lag', lag); return null; }
+  let acNum = 0, acDen = 0;
+  for (let i = 0; i + lag < sm.length; i++) {
+    acNum += sm[i] * sm[i + lag];
+    acDen += sm[i] * sm[i];
+  }
+  const acScore = acDen > 0 ? acNum / acDen : 0;
+  console.log(tag, `autocorrelation@lag${lag}=${acScore.toFixed(3)} (threshold 0.45)`);
+  if (acDen <= 0 || acScore < 0.45) { console.log(tag, 'REJECT: autocorrelation too low'); return null; }
+
+  const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
+  const finalHr = (hr >= 35 && hr <= 160) ? hr : null;
+  console.log(tag, `RESULT: ${finalHr == null ? 'null (out of range ' + hr.toFixed(1) + ')' : finalHr.toFixed(1) + ' bpm'}`);
+  return finalHr;
 }
 
 /** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
