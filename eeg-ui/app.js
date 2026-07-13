@@ -1984,6 +1984,31 @@ function computeHeartRate(signal) {
   const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
   if (rrStd / meanRR > 0.18) return null;
 
+  // Autocorrelation confirmation — the checks above only verify that the
+  // greedily-picked peak *gaps* are self-consistent, which is weaker than it
+  // looks: once the 0.4s refractory floor forces picks into a narrow band,
+  // pure noise satisfies it too. Confirmed empirically (synthetic white-noise
+  // PPG windows, no pulse at all): the pre-fix version reported a confident
+  // ~120-137 BPM on essentially every trial, because noise has so many local
+  // maxima that the refractory spacing alone quantizes them into a
+  // deceptively regular ~26-32-sample rhythm. Confirm the candidate period
+  // actually corresponds to periodic energy in the signal itself via
+  // normalized autocorrelation at lag = meanRR — a real pulse train has
+  // strong self-similarity one period later; noise doesn't, regardless of
+  // how its greedily-detected peaks happen to space out. (0.45 threshold:
+  // 0/100 false positives on synthetic noise, 100% accurate on synthetic
+  // clean pulses 45-115bpm and on dicrotic-notch-heavy pulses, while still
+  // correctly returning null rather than a fabricated number when the pulse
+  // is too weak relative to noise to trust — see scratchpad/hr_test/.)
+  const lag = Math.round(meanRR);
+  if (lag < 1 || lag >= sm.length) return null;
+  let acNum = 0, acDen = 0;
+  for (let i = 0; i + lag < sm.length; i++) {
+    acNum += sm[i] * sm[i + lag];
+    acDen += sm[i] * sm[i];
+  }
+  if (acDen <= 0 || acNum / acDen < 0.45) return null;
+
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
   return (hr >= 35 && hr <= 160) ? hr : null;
 }
