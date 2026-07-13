@@ -1956,6 +1956,59 @@ function onMusePPG(ev, channel) {
   }
 }
 
+// Real Muse S captures (via HR_DEBUG logging) showed the dicrotic notch
+// sometimes registering as its own peak strongly enough to survive
+// threshold+refractory detection — not on every cycle (amplitude varies too
+// much cycle-to-cycle for a clean, always-present split), but often enough
+// within an 8s window that the resulting RR-interval list becomes bimodal:
+// a cluster near the true beat-to-beat interval, and a cluster near half of
+// it (beat-to-notch / notch-to-beat). When the notch-driven cluster happens
+// to be the majority (or ties), the plain median vote in computeHeartRate
+// picks the WRONG (fast) cluster, reporting ~2x the true rate. Detect that
+// bimodal ~2x pattern directly and prefer the slower cluster — a real
+// dicrotic notch cannot occur more often than the heartbeat it's part of, so
+// the longer interval is always the physiologically correct one to trust.
+//
+// Tuned and validated against 9 RR sequences captured live from a real
+// device during an actual bad episode (see scratchpad/hr_test/real_data_v5.js):
+// 0 false positives across every accurately-reported window, and an exact
+// fix on the cleanest reproduction (raw 137.1bpm -> corrected 78.4bpm,
+// matching the reference device's ~80bpm). Deliberately conservative — the
+// minimum-cluster-size requirement means it won't catch every messy window
+// (some have extra contaminating outliers, likely missed-beat artifacts,
+// that break a clean 2-cluster split), but it never overrides an
+// already-correct reading.
+function detectHarmonicDoubling(rrs) {
+  if (rrs.length < 6) return null;
+  const sortedAll = [...rrs].sort((a, b) => a - b);
+  const med = sortedAll[Math.floor(sortedAll.length / 2)];
+  // Strip extreme single-interval outliers (e.g. one missed-beat gap) before
+  // clustering — they're unrelated to the notch/beat alternation and would
+  // otherwise contaminate the split search.
+  const cleaned = rrs.filter(rr => rr <= med * 2.0);
+  if (cleaned.length < 6) return null;
+
+  const sorted = [...cleaned].sort((a, b) => a - b);
+  const minN = Math.max(4, Math.ceil(0.35 * cleaned.length));
+  const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const cv = (arr, m) => Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length) / m;
+
+  let best = null;
+  for (let i = minN; i <= sorted.length - minN; i++) {
+    const lowCluster = sorted.slice(0, i), highCluster = sorted.slice(i);
+    const lowMean = mean(lowCluster), highMean = mean(highCluster);
+    const ratio = highMean / lowMean;
+    if (ratio < 1.6 || ratio > 2.4) continue; // not a clean ~2x split
+    const lowCv = cv(lowCluster, lowMean), highCv = cv(highCluster, highMean);
+    if (lowCv > 0.25 || highCv > 0.25) continue; // clusters too noisy to trust
+    const combinedCv = (lowCv * lowCluster.length + highCv * highCluster.length) / (lowCluster.length + highCluster.length);
+    if (!best || combinedCv < best.combinedCv) {
+      best = { period: highMean, lowMean, highMean, lowN: lowCluster.length, highN: highCluster.length, combinedCv };
+    }
+  }
+  return best;
+}
+
 /** BPM from PPG IR: detrend -> smooth -> peak-detect -> outlier-reject RR intervals. */
 function computeHeartRate(signal) {
   if (signal.length < PPG_SAMPLE_RATE * 2) return null;
@@ -1994,21 +2047,32 @@ function computeHeartRate(signal) {
   if (peaks.length < 6) return null; // need >=5 RR intervals before trusting an estimate
 
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  const sortedRr = [...rrs].sort((a, b) => a - b);
-  const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
-  // Reject any RR interval more than 25% off the median — one artifact peak
-  // shouldn't be able to swing the whole estimate.
-  const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
-  if (kept.length < 4) return null;
 
-  const meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
-  // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
-  // trigger (e.g. no skin contact) tends to still be irregular even after
-  // outlier-rejection above. Reject if the surviving intervals are still too
-  // scattered (coefficient of variation) rather than reporting a number that
-  // isn't really a heartbeat.
-  const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
-  if (rrStd / meanRR > 0.18) return null;
+  // Try the harmonic-doubling correction first — when it fires, a bimodal
+  // ~2x split was found and the slower cluster is trusted over the plain
+  // median vote (see detectHarmonicDoubling for why). Otherwise fall back to
+  // the original median-based outlier rejection.
+  let meanRR;
+  const doubling = detectHarmonicDoubling(rrs);
+  if (doubling) {
+    meanRR = doubling.period;
+  } else {
+    const sortedRr = [...rrs].sort((a, b) => a - b);
+    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+    // Reject any RR interval more than 25% off the median — one artifact peak
+    // shouldn't be able to swing the whole estimate.
+    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+    if (kept.length < 4) return null;
+
+    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+    // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
+    // trigger (e.g. no skin contact) tends to still be irregular even after
+    // outlier-rejection above. Reject if the surviving intervals are still too
+    // scattered (coefficient of variation) rather than reporting a number that
+    // isn't really a heartbeat.
+    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+    if (rrStd / meanRR > 0.18) return null;
+  }
 
   // Autocorrelation confirmation — the checks above only verify that the
   // greedily-picked peak *gaps* are self-consistent, which is weaker than it
@@ -2077,17 +2141,26 @@ function computeHeartRateDebug(signal) {
   if (peaks.length < 6) { console.log(tag, 'REJECT: too few peaks'); return null; }
 
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  const sortedRr = [...rrs].sort((a, b) => a - b);
-  const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
-  const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
-  console.log(tag, `rrs(samples)=[${rrs.join(',')}] median=${medianRr} kept=[${kept.join(',')}]`);
-  if (kept.length < 4) { console.log(tag, 'REJECT: too few kept RRs'); return null; }
+  console.log(tag, `rrs(samples)=[${rrs.join(',')}]`);
 
-  const meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
-  const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
-  const cv = rrStd / meanRR;
-  console.log(tag, `meanRR=${meanRR.toFixed(2)}samples cv=${cv.toFixed(3)} -> naiveHr=${(60 * PPG_SAMPLE_RATE / meanRR).toFixed(1)}`);
-  if (cv > 0.18) { console.log(tag, 'REJECT: cv too high'); return null; }
+  let meanRR;
+  const doubling = detectHarmonicDoubling(rrs);
+  if (doubling) {
+    meanRR = doubling.period;
+    console.log(tag, `HARMONIC-DOUBLING CORRECTION: lowMean=${doubling.lowMean.toFixed(1)}(n=${doubling.lowN}) highMean=${doubling.highMean.toFixed(1)}(n=${doubling.highN}) -> using period=${meanRR.toFixed(2)} instead of median vote`);
+  } else {
+    const sortedRr = [...rrs].sort((a, b) => a - b);
+    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+    console.log(tag, `median=${medianRr} kept=[${kept.join(',')}]`);
+    if (kept.length < 4) { console.log(tag, 'REJECT: too few kept RRs'); return null; }
+
+    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+    const cv = rrStd / meanRR;
+    console.log(tag, `meanRR=${meanRR.toFixed(2)}samples cv=${cv.toFixed(3)} -> naiveHr=${(60 * PPG_SAMPLE_RATE / meanRR).toFixed(1)}`);
+    if (cv > 0.18) { console.log(tag, 'REJECT: cv too high'); return null; }
+  }
 
   const lag = Math.round(meanRR);
   if (lag < 1 || lag >= sm.length) { console.log(tag, 'REJECT: bad lag', lag); return null; }
