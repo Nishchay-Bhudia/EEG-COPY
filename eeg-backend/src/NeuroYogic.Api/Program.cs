@@ -41,13 +41,22 @@ builder.Services.AddHttpClient();
 builder.Services.AddScoped<NeuroYogic.Api.Services.IChatService, NeuroYogic.Api.Services.GroqChatService>();
 
 // ── CORS (open by default; restrict via Cors:Origins) ──
+// AllowCredentials() only makes sense paired with an explicit origin list —
+// this API authenticates purely via JWT Bearer (no cookies are ever set, see
+// Program.cs's AddAuthentication below), so the open/no-origins-configured
+// fallback has no legitimate use for browser-managed credentials and
+// shouldn't advertise them: SetIsOriginAllowed(_ => true) + AllowCredentials()
+// is the well-known "reflect any origin to sidestep the no-wildcard-with-
+// credentials rule" anti-pattern, and doing that unconditionally (this is
+// the *default* config, not dev-only) is unnecessary risk surface for zero
+// functional benefit given no code path here relies on cookie-based auth.
 var corsOrigins = builder.Configuration.GetSection("Cors:Origins").Get<string[]>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
 {
     if (corsOrigins is { Length: > 0 })
         policy.WithOrigins(corsOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
     else
-        policy.SetIsOriginAllowed(_ => true).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+        policy.SetIsOriginAllowed(_ => true).AllowAnyHeader().AllowAnyMethod();
 }));
 
 // ── JWT authentication ──

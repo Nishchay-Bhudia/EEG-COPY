@@ -31,7 +31,8 @@ app.use((req, res, next) => {
   const origin = req.headers.origin || '';
   const allowedPatterns = [
     /\.vercel\.app$/,
-    /localhost/,
+    /^https?:\/\/localhost(:\d+)?$/,
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
   ];
   // Also allow any explicitly configured origins (comma-separated env var)
   const extraOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
