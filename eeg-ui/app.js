@@ -1904,9 +1904,27 @@ function onBtDisconnected() {
 // recompute) don't require better hardware — they make the estimate honest
 // about what a noisy signal actually supports.
 let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
-const PPG_RECOMPUTE_MS = 1000; // real HR doesn't need updating faster than 1/s
+let lastValidHrAt = 0, lastValidSpo2At = 0;
+const PPG_RECOMPUTE_MS = 1000;  // real HR doesn't need updating faster than 1/s
+// If nothing's been confirmed in this long, the number on screen is no
+// longer "live" — but per explicit feedback, don't blank it out either
+// (that read as flicker); keep showing the last known value and just change
+// the status label so it's honest about being a last-known reading, not a
+// fresh one.
+const PPG_STALE_MS = 8000;
 
-function resetPpgSmoothing() { hrEma = null; spo2Ema = null; lastPpgComputeAt = 0; }
+function resetPpgSmoothing() {
+  hrEma = null; spo2Ema = null; lastPpgComputeAt = 0;
+  lastValidHrAt = 0; lastValidSpo2At = 0;
+}
+function isHrStale()   { return hrEma == null   || performance.now() - lastValidHrAt   > PPG_STALE_MS; }
+function isSpo2Stale() { return spo2Ema == null || performance.now() - lastValidSpo2At > PPG_STALE_MS; }
+
+// Diagnostic logging for computeHeartRate() internals (peak count, RR
+// intervals, autocorrelation score, and whether the harmonic-doubling
+// correction below fired). Off by default so normal use stays quiet; flip
+// to true here and redeploy if a real-hardware mismatch needs diagnosing.
+const HR_DEBUG = false;
 
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
@@ -1920,21 +1938,80 @@ function onMusePPG(ev, channel) {
   const now = performance.now();
   if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
     lastPpgComputeAt = now;
-    const rawHr = computeHeartRate(ppgBuf.ir);
-    if (rawHr != null) hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+    const rawHr = HR_DEBUG ? computeHeartRateDebug(ppgBuf.ir) : computeHeartRate(ppgBuf.ir);
+    if (rawHr != null) {
+      hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+      lastValidHrAt = now;
+    }
     latestHeartRate = hrEma;
 
     if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) {
       const rawSpo2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
-      if (rawSpo2 != null) spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+      if (rawSpo2 != null) {
+        spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+        lastValidSpo2At = now;
+      }
       latestSpO2 = spo2Ema;
     }
 
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl && latestHeartRate != null) { hrEl.textContent = localizeNumber(latestHeartRate.toFixed(0)); if (hrSt) hrSt.textContent = t('liveReading'); }
-    if (spo2El && latestSpO2 != null)   { spo2El.textContent = localizeNumber(latestSpO2.toFixed(1));   if (spo2St) spo2St.textContent = t('liveReading'); }
+    if (hrEl)  { hrEl.textContent  = latestHeartRate != null ? localizeNumber(latestHeartRate.toFixed(0)) : '—'; if (hrSt)  hrSt.textContent  = latestHeartRate == null ? t('awaitingSignal') : (isHrStale()   ? t('lastKnownReading') : t('liveReading')); }
+    if (spo2El){ spo2El.textContent = latestSpO2 != null      ? localizeNumber(latestSpO2.toFixed(1))      : '—'; if (spo2St) spo2St.textContent = latestSpO2 == null      ? t('awaitingSignal') : (isSpo2Stale() ? t('lastKnownReading') : t('liveReading')); }
   }
+}
+
+// Real Muse S captures (via HR_DEBUG logging) showed the dicrotic notch
+// sometimes registering as its own peak strongly enough to survive
+// threshold+refractory detection — not on every cycle (amplitude varies too
+// much cycle-to-cycle for a clean, always-present split), but often enough
+// within an 8s window that the resulting RR-interval list becomes bimodal:
+// a cluster near the true beat-to-beat interval, and a cluster near half of
+// it (beat-to-notch / notch-to-beat). When the notch-driven cluster happens
+// to be the majority (or ties), the plain median vote in computeHeartRate
+// picks the WRONG (fast) cluster, reporting ~2x the true rate. Detect that
+// bimodal ~2x pattern directly and prefer the slower cluster — a real
+// dicrotic notch cannot occur more often than the heartbeat it's part of, so
+// the longer interval is always the physiologically correct one to trust.
+//
+// Tuned and validated against 9 RR sequences captured live from a real
+// device during an actual bad episode (see scratchpad/hr_test/real_data_v5.js):
+// 0 false positives across every accurately-reported window, and an exact
+// fix on the cleanest reproduction (raw 137.1bpm -> corrected 78.4bpm,
+// matching the reference device's ~80bpm). Deliberately conservative — the
+// minimum-cluster-size requirement means it won't catch every messy window
+// (some have extra contaminating outliers, likely missed-beat artifacts,
+// that break a clean 2-cluster split), but it never overrides an
+// already-correct reading.
+function detectHarmonicDoubling(rrs) {
+  if (rrs.length < 6) return null;
+  const sortedAll = [...rrs].sort((a, b) => a - b);
+  const med = sortedAll[Math.floor(sortedAll.length / 2)];
+  // Strip extreme single-interval outliers (e.g. one missed-beat gap) before
+  // clustering — they're unrelated to the notch/beat alternation and would
+  // otherwise contaminate the split search.
+  const cleaned = rrs.filter(rr => rr <= med * 2.0);
+  if (cleaned.length < 6) return null;
+
+  const sorted = [...cleaned].sort((a, b) => a - b);
+  const minN = Math.max(4, Math.ceil(0.35 * cleaned.length));
+  const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const cv = (arr, m) => Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length) / m;
+
+  let best = null;
+  for (let i = minN; i <= sorted.length - minN; i++) {
+    const lowCluster = sorted.slice(0, i), highCluster = sorted.slice(i);
+    const lowMean = mean(lowCluster), highMean = mean(highCluster);
+    const ratio = highMean / lowMean;
+    if (ratio < 1.6 || ratio > 2.4) continue; // not a clean ~2x split
+    const lowCv = cv(lowCluster, lowMean), highCv = cv(highCluster, highMean);
+    if (lowCv > 0.25 || highCv > 0.25) continue; // clusters too noisy to trust
+    const combinedCv = (lowCv * lowCluster.length + highCv * highCluster.length) / (lowCluster.length + highCluster.length);
+    if (!best || combinedCv < best.combinedCv) {
+      best = { period: highMean, lowMean, highMean, lowN: lowCluster.length, highN: highCluster.length, combinedCv };
+    }
+  }
+  return best;
 }
 
 /** BPM from PPG IR: detrend -> smooth -> peak-detect -> outlier-reject RR intervals. */
@@ -1975,24 +2052,136 @@ function computeHeartRate(signal) {
   if (peaks.length < 6) return null; // need >=5 RR intervals before trusting an estimate
 
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  const sortedRr = [...rrs].sort((a, b) => a - b);
-  const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
-  // Reject any RR interval more than 25% off the median — one artifact peak
-  // shouldn't be able to swing the whole estimate.
-  const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
-  if (kept.length < 4) return null;
 
-  const meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
-  // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
-  // trigger (e.g. no skin contact) tends to still be irregular even after
-  // outlier-rejection above. Reject if the surviving intervals are still too
-  // scattered (coefficient of variation) rather than reporting a number that
-  // isn't really a heartbeat.
-  const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
-  if (rrStd / meanRR > 0.18) return null;
+  // Try the harmonic-doubling correction first — when it fires, a bimodal
+  // ~2x split was found and the slower cluster is trusted over the plain
+  // median vote (see detectHarmonicDoubling for why). Otherwise fall back to
+  // the original median-based outlier rejection.
+  let meanRR;
+  const doubling = detectHarmonicDoubling(rrs);
+  if (doubling) {
+    meanRR = doubling.period;
+  } else {
+    const sortedRr = [...rrs].sort((a, b) => a - b);
+    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+    // Reject any RR interval more than 25% off the median — one artifact peak
+    // shouldn't be able to swing the whole estimate.
+    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+    if (kept.length < 4) return null;
+
+    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+    // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
+    // trigger (e.g. no skin contact) tends to still be irregular even after
+    // outlier-rejection above. Reject if the surviving intervals are still too
+    // scattered (coefficient of variation) rather than reporting a number that
+    // isn't really a heartbeat.
+    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+    if (rrStd / meanRR > 0.18) return null;
+  }
+
+  // Autocorrelation confirmation — the checks above only verify that the
+  // greedily-picked peak *gaps* are self-consistent, which is weaker than it
+  // looks: once the 0.4s refractory floor forces picks into a narrow band,
+  // pure noise satisfies it too. Confirmed empirically (synthetic white-noise
+  // PPG windows, no pulse at all): the pre-fix version reported a confident
+  // ~120-137 BPM on essentially every trial, because noise has so many local
+  // maxima that the refractory spacing alone quantizes them into a
+  // deceptively regular ~26-32-sample rhythm. Confirm the candidate period
+  // actually corresponds to periodic energy in the signal itself via
+  // normalized autocorrelation at lag = meanRR — a real pulse train has
+  // strong self-similarity one period later; noise doesn't, regardless of
+  // how its greedily-detected peaks happen to space out. (0.45 threshold:
+  // 0/100 false positives on synthetic noise, 100% accurate on synthetic
+  // clean pulses 45-115bpm and on dicrotic-notch-heavy pulses, while still
+  // correctly returning null rather than a fabricated number when the pulse
+  // is too weak relative to noise to trust — see scratchpad/hr_test/.)
+  const lag = Math.round(meanRR);
+  if (lag < 1 || lag >= sm.length) return null;
+  let acNum = 0, acDen = 0;
+  for (let i = 0; i + lag < sm.length; i++) {
+    acNum += sm[i] * sm[i + lag];
+    acDen += sm[i] * sm[i];
+  }
+  if (acDen <= 0 || acNum / acDen < 0.45) return null;
 
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
   return (hr >= 35 && hr <= 160) ? hr : null;
+}
+
+/** Verbatim copy of computeHeartRate() with console.log diagnostics at every
+ * stage/rejection point — TEMPORARY, for chasing a real-device mismatch that
+ * synthetic test signals haven't reproduced. Remove once resolved. */
+function computeHeartRateDebug(signal) {
+  const tag = '[HR]';
+  if (signal.length < PPG_SAMPLE_RATE * 2) { console.log(tag, 'too short:', signal.length); return null; }
+
+  const baseWin = PPG_SAMPLE_RATE;
+  const ac = new Array(signal.length);
+  let baseSum = 0;
+  for (let i = 0; i < signal.length; i++) {
+    baseSum += signal[i];
+    if (i >= baseWin) baseSum -= signal[i - baseWin];
+    const baseline = baseSum / Math.min(i + 1, baseWin);
+    ac[i] = signal[i] - baseline;
+  }
+  const sm = new Array(ac.length);
+  for (let i = 0; i < ac.length; i++) {
+    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
+    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
+  }
+
+  const rawMin = Math.min(...signal), rawMax = Math.max(...signal);
+  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
+  console.log(tag, `rawRange=[${rawMin},${rawMax}] detrendedStd=${std.toFixed(1)}`);
+
+  const thr = std * 0.5;
+  const minDist = Math.round(PPG_SAMPLE_RATE * 0.4);
+  const peaks = []; let lastPeak = -minDist;
+  for (let i = 1; i < sm.length - 1; i++) {
+    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
+      peaks.push(i); lastPeak = i;
+    }
+  }
+  console.log(tag, `peaks=${peaks.length} positions=[${peaks.join(',')}] heights=[${peaks.map(p => sm[p].toFixed(0)).join(',')}]`);
+  if (peaks.length < 6) { console.log(tag, 'REJECT: too few peaks'); return null; }
+
+  const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
+  console.log(tag, `rrs(samples)=[${rrs.join(',')}]`);
+
+  let meanRR;
+  const doubling = detectHarmonicDoubling(rrs);
+  if (doubling) {
+    meanRR = doubling.period;
+    console.log(tag, `HARMONIC-DOUBLING CORRECTION: lowMean=${doubling.lowMean.toFixed(1)}(n=${doubling.lowN}) highMean=${doubling.highMean.toFixed(1)}(n=${doubling.highN}) -> using period=${meanRR.toFixed(2)} instead of median vote`);
+  } else {
+    const sortedRr = [...rrs].sort((a, b) => a - b);
+    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+    console.log(tag, `median=${medianRr} kept=[${kept.join(',')}]`);
+    if (kept.length < 4) { console.log(tag, 'REJECT: too few kept RRs'); return null; }
+
+    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+    const cv = rrStd / meanRR;
+    console.log(tag, `meanRR=${meanRR.toFixed(2)}samples cv=${cv.toFixed(3)} -> naiveHr=${(60 * PPG_SAMPLE_RATE / meanRR).toFixed(1)}`);
+    if (cv > 0.18) { console.log(tag, 'REJECT: cv too high'); return null; }
+  }
+
+  const lag = Math.round(meanRR);
+  if (lag < 1 || lag >= sm.length) { console.log(tag, 'REJECT: bad lag', lag); return null; }
+  let acNum = 0, acDen = 0;
+  for (let i = 0; i + lag < sm.length; i++) {
+    acNum += sm[i] * sm[i + lag];
+    acDen += sm[i] * sm[i];
+  }
+  const acScore = acDen > 0 ? acNum / acDen : 0;
+  console.log(tag, `autocorrelation@lag${lag}=${acScore.toFixed(3)} (threshold 0.45)`);
+  if (acDen <= 0 || acScore < 0.45) { console.log(tag, 'REJECT: autocorrelation too low'); return null; }
+
+  const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
+  const finalHr = (hr >= 35 && hr <= 160) ? hr : null;
+  console.log(tag, `RESULT: ${finalHr == null ? 'null (out of range ' + hr.toFixed(1) + ')' : finalHr.toFixed(1) + ' bpm'}`);
+  return finalHr;
 }
 
 /** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
@@ -2620,10 +2809,17 @@ function applyReading(r) {
   const hrEl = $('val-hr');
   const spo2StatusEl = $('spo2-status');
   const hrStatusEl = $('hr-status');
+  // In live Bluetooth mode, blood_oxygen/heart_rate reflect the same
+  // hrEma/spo2Ema tracked in onMusePPG — use its staleness state so a
+  // momentary bad window doesn't blank the card (per explicit feedback),
+  // just marks the number as "last known" rather than live. Demo/backend-URL
+  // /replay modes don't populate that PPG-specific state, so they keep the
+  // simpler null-check ("no reading yet" vs "have one").
+  const hrIsBleTracked = mode === 'bluetooth';
   if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
   if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
-  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? t('liveReading') : t('awaitingSignal');
-  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? t('liveReading') : t('awaitingSignal');
+  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen == null ? t('awaitingSignal') : (hrIsBleTracked && isSpo2Stale() ? t('lastKnownReading') : t('liveReading'));
+  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate == null ? t('awaitingSignal') : (hrIsBleTracked && isHrStale() ? t('lastKnownReading') : t('liveReading'));
 
   localizeDom(document.querySelector('.dashboard-grid'));
 }
