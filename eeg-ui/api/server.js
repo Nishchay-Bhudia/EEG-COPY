@@ -1208,7 +1208,6 @@ If the user's question is NOT related to EEG, brainwaves, meditation, mindfulnes
 "I'm AI Baba, and I can only help you understand your EEG session data. I'm not able to answer questions on other topics — ask me something about your brainwaves or meditation session!"
 Examples of off-topic queries you must refuse: weather, sports, coding help, maths, history, news, personal life advice unrelated to meditation, recipes, jokes, general knowledge questions.`;
 
-const OFF_TOPIC_REPLY = "I'm AI Baba, and I can only help you understand your EEG session data. I'm not able to answer questions on other topics — ask me something about your brainwaves or meditation session!";
 const OFF_TOPIC_REPLY_GU = "હું AI બાબા છું, અને હું ફક્ત તમારા EEG સેશન ડેટા સમજવામાં તમારી મદદ કરી શકું છું. હું અન્ય વિષયો પર પ્રશ્નોના જવાબ આપી શકતો નથી — મને તમારા મગજના તરંગો અથવા ધ્યાન સેશન વિશે કંઈક પૂછો!";
 
 // The app UI has an English/Gujarati toggle (i18n.js) — when the user is in
@@ -1223,25 +1222,6 @@ For the off-topic case specifically, override the earlier instruction to reply w
 };
 function systemPromptFor(lang) {
   return EEG_SYSTEM_PROMPT + (LANG_INSTRUCTION[lang] || '');
-}
-
-// EEG-domain keywords — used for server-side off-topic detection
-const EEG_KEYWORDS = [
-  'eeg', 'brainwave', 'alpha', 'beta', 'theta', 'delta', 'gamma',
-  'chitta', 'kshipta', 'vikshipta', 'ekagra', 'niruddha', 'concentration',
-  'focus', 'meditation', 'mindfulness', 'swara', 'ida', 'pingala', 'sushumna',
-  'sattva', 'rajas', 'tamas', 'guna', 'epoch', 'session', 'relaxed', 'relaxation',
-  'contemplative', 'depth', 'profound', 'yogic', 'tattva', 'band', 'spectral',
-  'brainwave', 'neural', 'mental', 'state', 'power', 'signal', 'frequency',
-];
-
-// Detect if a user message looks completely off-topic before calling the LLM.
-// Returns true if the message appears to be about EEG/meditation.
-function isEegRelated(text) {
-  const lower = text.toLowerCase();
-  // Allow short follow-up questions (they inherit context from conversation)
-  if (lower.trim().length < 20) return true;
-  return EEG_KEYWORDS.some(kw => lower.includes(kw));
 }
 
 function buildSessionContext(session, epochs, includeFullLog = true) {
@@ -1438,14 +1418,17 @@ router.post('/ai/chat', requireAuth, async (req, res) => {
     if (message.trim().length > 600)  return res.status(400).json({ error: 'Message too long (max 600 chars)' });
     if (!(await ownedSession(sessionId, req))) return res.status(403).json({ error: 'Forbidden' });
 
-    // Server-side off-topic guard — fast path, no LLM call needed. The
-    // keyword list is English-only, so it can't reliably judge a Gujarati
-    // message (every long Gujarati question would false-positive as
-    // off-topic); skip the heuristic there and let the system prompt's own
-    // off-topic rule handle it inside the LLM call instead.
-    if (lang !== 'gu' && !isEegRelated(message)) {
-      return res.json({ reply: OFF_TOPIC_REPLY });
-    }
+    // No server-side keyword pre-filter here (previously gated English
+    // messages through isEegRelated() before this comment) — it produced
+    // false positives on completely legitimate session questions whenever
+    // the wording didn't happen to contain one of a fixed keyword list (e.g.
+    // "how well was I concentrating" matched neither "concentration" nor any
+    // other keyword and got auto-refused, even though AI Baba had the full
+    // session data needed to answer it). Gujarati already skipped this same
+    // heuristic for the same reason (a fixed English keyword list can't judge
+    // Gujarati text); English gets the identical treatment now — the system
+    // prompt's own ABSOLUTE RULE section handles off-topic refusal inside the
+    // LLM call, which understands paraphrases a keyword list cannot.
 
     const [{ rows: sessionRows }, { rows: epochs }] = await Promise.all([
       pool.query('SELECT * FROM eeg_sessions WHERE id = $1', [sessionId]),
