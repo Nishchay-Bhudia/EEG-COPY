@@ -2039,10 +2039,18 @@ function computeHeartRate(signal) {
 
   const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
   const thr = std * 0.5;
-  // 0.4 s refractory → max ~150 BPM; this app is for meditation, not sprints,
-  // and capping the search window itself (not just the final result) stops
-  // double-counting one true beat as two spurious close peaks.
-  const minDist = Math.round(PPG_SAMPLE_RATE * 0.4);
+  // Refractory period between accepted peaks — this app is for meditation,
+  // not sprints, and capping the search window itself (not just the final
+  // result) stops double-counting one true beat as two spurious close peaks.
+  // Widened from 0.4s (max ~150bpm) to ~0.44s (max ~137bpm) after real
+  // device captures showed the dicrotic notch landing 26-32 samples
+  // (400-500ms) after the systolic peak often enough to survive the old,
+  // tighter refractory and get counted as its own beat — re-filtering those
+  // exact captured peak positions with this wider spacing (before any other
+  // correction) took reported rates from ~130-137bpm down to ~63-76bpm
+  // against a true rate of ~78-80bpm, with no measurable cost to correctly
+  // read windows in the same captures (see scratchpad/hr_test/refractory_resim.js).
+  const minDist = Math.round(60 * PPG_SAMPLE_RATE / 137);
   const peaks = []; let lastPeak = -minDist;
   for (let i = 1; i < sm.length - 1; i++) {
     if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
@@ -2135,7 +2143,7 @@ function computeHeartRateDebug(signal) {
   console.log(tag, `rawRange=[${rawMin},${rawMax}] detrendedStd=${std.toFixed(1)}`);
 
   const thr = std * 0.5;
-  const minDist = Math.round(PPG_SAMPLE_RATE * 0.4);
+  const minDist = Math.round(60 * PPG_SAMPLE_RATE / 137);
   const peaks = []; let lastPeak = -minDist;
   for (let i = 1; i < sm.length - 1; i++) {
     if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
