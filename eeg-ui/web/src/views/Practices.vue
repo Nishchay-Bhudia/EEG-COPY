@@ -6,6 +6,9 @@
 // historical sessions' labels intact (session.activity is stored as text).
 import { reactive, ref, onMounted } from 'vue';
 import { api } from '@/lib/api';
+import { useI18n } from '@/composables/useI18n';
+
+const { t, tf } = useI18n();
 
 const activities = ref([]);
 const error = ref('');
@@ -19,7 +22,7 @@ async function load() {
     const rows = await api('GET', '/activities?all=true');
     activities.value = Array.isArray(rows) ? rows : [];
   } catch (e) {
-    error.value = 'Could not load practices: ' + e.message;
+    error.value = t('couldNotLoadPractices') + e.message;
   } finally {
     loading.value = false;
   }
@@ -36,7 +39,7 @@ async function createActivity() {
   if (creating.value) return;
   formError.value = '';
   const name = form.name.trim();
-  if (!name) { formError.value = 'Practice name is required.'; return; }
+  if (!name) { formError.value = t('practiceNameRequired'); return; }
   creating.value = true;
   try {
     await api('POST', '/activities', { name });
@@ -67,7 +70,7 @@ function cancelEdit() {
 async function saveEdit(a) {
   editError.value = '';
   const name = editValue.value.trim();
-  if (!name) { editError.value = 'Name required.'; return; }
+  if (!name) { editError.value = t('nameRequired'); return; }
   if (name === a.name) { cancelEdit(); return; }
   try {
     await api('PUT', '/activities/' + a.id, { name });
@@ -104,7 +107,7 @@ async function toggleArchive(a) {
 }
 
 async function remove(a) {
-  if (!confirm(`Delete practice "${a.name}"? Existing sessions keep their label; it just leaves the picker.`)) return;
+  if (!confirm(tf('confirmDeletePracticeTemplate', { name: a.name }))) return;
   try {
     await api('DELETE', '/activities/' + a.id);
     await load();
@@ -118,38 +121,38 @@ async function remove(a) {
   <section class="view-practices">
     <div class="view-header">
       <div>
-        <h2 class="view-title">Practices</h2>
-        <div class="view-sub">The vocabulary of contemplative practices offered when starting a sitting (superadmin only).</div>
+        <h2 class="view-title">{{ t('practicesTitle') }}</h2>
+        <div class="view-sub">{{ t('practicesSub') }}</div>
       </div>
     </div>
 
     <!-- ─ Create ─ -->
     <div class="card create-card">
-      <div class="card-label">ADD PRACTICE</div>
+      <div class="card-label">{{ t('addPracticeTitle') }}</div>
       <form class="create-form" @submit.prevent="createActivity">
         <input
           v-model="form.name" class="field field--grow" type="text"
-          placeholder="e.g. Vipassanā, Kīrtan, Breath-count…" autocomplete="off"
+          :placeholder="t('practiceNamePlaceholder')" autocomplete="off"
         />
         <button class="btn btn-primary" type="submit" :disabled="creating">
-          {{ creating ? 'Adding…' : 'Add' }}
+          {{ creating ? t('addingEllipsis') : t('add') }}
         </button>
       </form>
       <div v-if="formError" class="form-error">{{ formError }}</div>
-      <div class="hint">New practices appear at the bottom of the picker. Reorder with the arrows; archive to hide one from the picker without losing past sessions' labels.</div>
+      <div class="hint">{{ t('addPracticeHint') }}</div>
     </div>
 
     <!-- ─ List ─ -->
     <div class="card">
-      <div class="card-label">ALL PRACTICES</div>
+      <div class="card-label">{{ t('allPracticesTitle') }}</div>
       <div v-if="error" class="empty-state">{{ error }}</div>
-      <div v-else-if="loading" class="empty-state">Loading…</div>
-      <div v-else-if="!activities.length" class="empty-state">No practices yet. Add the first above.</div>
+      <div v-else-if="loading" class="empty-state">{{ t('loading') }}</div>
+      <div v-else-if="!activities.length" class="empty-state">{{ t('noPracticesYetHint') }}</div>
       <div v-else class="row-list">
         <div v-for="(a, i) in activities" :key="a.id" class="row" :class="{ 'row--archived': a.archived }">
           <div class="row__reorder">
-            <button class="reorder-btn" :disabled="i === 0" title="Move up" @click="move(a, -1)">▲</button>
-            <button class="reorder-btn" :disabled="i === activities.length - 1" title="Move down" @click="move(a, 1)">▼</button>
+            <button class="reorder-btn" :disabled="i === 0" :title="t('moveUpTitle')" @click="move(a, -1)">▲</button>
+            <button class="reorder-btn" :disabled="i === activities.length - 1" :title="t('moveDownTitle')" @click="move(a, 1)">▼</button>
           </div>
 
           <div class="row__id">
@@ -162,21 +165,21 @@ async function remove(a) {
             </template>
             <template v-else>
               <span class="row__name">{{ a.name }}</span>
-              <span v-if="a.archived" class="row__badge">archived</span>
+              <span v-if="a.archived" class="row__badge">{{ t('archivedBadge') }}</span>
             </template>
           </div>
 
           <div class="row__actions">
             <template v-if="editingId === a.id">
-              <button class="btn btn-primary btn-sm" @click="saveEdit(a)">Save</button>
-              <button class="btn btn-ghost btn-sm" @click="cancelEdit">Cancel</button>
+              <button class="btn btn-primary btn-sm" @click="saveEdit(a)">{{ t('saveBtn') }}</button>
+              <button class="btn btn-ghost btn-sm" @click="cancelEdit">{{ t('cancelBtn') }}</button>
             </template>
             <template v-else>
-              <button class="btn btn-ghost btn-sm" @click="openEdit(a)">Rename</button>
+              <button class="btn btn-ghost btn-sm" @click="openEdit(a)">{{ t('renameBtn') }}</button>
               <button class="btn btn-ghost btn-sm" @click="toggleArchive(a)">
-                {{ a.archived ? 'Restore' : 'Archive' }}
+                {{ a.archived ? t('restoreBtn') : t('archiveBtn') }}
               </button>
-              <button class="btn btn-ghost btn-sm btn-danger" @click="remove(a)">Delete</button>
+              <button class="btn btn-ghost btn-sm btn-danger" @click="remove(a)">{{ t('deleteBtn') }}</button>
             </template>
           </div>
         </div>

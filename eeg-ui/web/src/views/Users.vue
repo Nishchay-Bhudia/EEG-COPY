@@ -6,17 +6,20 @@
 //
 // Role vocabulary (see the role model): 'admin' = superadmin (global),
 // 'co-admin' = instructor (owns their clients/students), 'user' = student.
-import { reactive, ref, onMounted } from 'vue';
+import { reactive, ref, onMounted, computed } from 'vue';
 import { api } from '@/lib/api';
 import { auth } from '@/lib/auth';
 import { formatDate } from '@/lib/clients';
+import { useI18n } from '@/composables/useI18n';
 
-const ROLE_OPTIONS = [
-  { value: 'user', label: 'Student (user)' },
-  { value: 'co-admin', label: 'Instructor (co-admin)' },
-  { value: 'admin', label: 'Superadmin (admin)' },
-];
-const ROLE_LABEL = { user: 'Student', 'co-admin': 'Instructor', admin: 'Superadmin' };
+const { t, tf } = useI18n();
+
+const ROLE_OPTIONS = computed(() => [
+  { value: 'user', label: t('roleStudentOption') },
+  { value: 'co-admin', label: t('roleInstructorOption') },
+  { value: 'admin', label: t('roleSuperadminOption') },
+]);
+const ROLE_LABEL = computed(() => ({ user: t('roleStudent'), 'co-admin': t('roleInstructor'), admin: t('roleSuperadmin') }));
 
 const users = ref([]);
 const error = ref('');
@@ -29,7 +32,7 @@ async function load() {
     const rows = await api('GET', '/users');
     users.value = Array.isArray(rows) ? rows : [];
   } catch (e) {
-    error.value = 'Could not load users: ' + e.message;
+    error.value = t('couldNotLoadUsers') + e.message;
   } finally {
     loading.value = false;
   }
@@ -46,8 +49,8 @@ async function createUser() {
   if (creating.value) return;
   formError.value = '';
   const username = form.username.trim();
-  if (!username) { formError.value = 'Username is required.'; return; }
-  if (form.password.length < 6) { formError.value = 'Password must be at least 6 characters.'; return; }
+  if (!username) { formError.value = t('usernameRequired'); return; }
+  if (form.password.length < 6) { formError.value = t('passwordMin6'); return; }
   creating.value = true;
   try {
     await api('POST', '/users', { username, password: form.password, role: form.role });
@@ -100,7 +103,7 @@ function cancelReset() {
 async function saveReset(u) {
   if (resetSaving.value) return;
   resetError.value = '';
-  if (resetValue.value.length < 6) { resetError.value = 'At least 6 characters.'; return; }
+  if (resetValue.value.length < 6) { resetError.value = t('atLeast6Chars'); return; }
   resetSaving.value = true;
   try {
     await api('PUT', '/users/' + u.id + '/password', { password: resetValue.value });
@@ -116,7 +119,7 @@ async function saveReset(u) {
 }
 
 async function deleteUser(u) {
-  if (!confirm(`Delete account "${u.username}"? This cannot be undone.`)) return;
+  if (!confirm(tf('confirmDeleteAccountTemplate', { name: u.username }))) return;
   try {
     await api('DELETE', '/users/' + u.id);
     await load();
@@ -130,41 +133,41 @@ async function deleteUser(u) {
   <section class="view-users">
     <div class="view-header">
       <div>
-        <h2 class="view-title">Users</h2>
-        <div class="view-sub">Provision instructors and manage every account (superadmin only).</div>
+        <h2 class="view-title">{{ t('usersTitle') }}</h2>
+        <div class="view-sub">{{ t('usersSub') }}</div>
       </div>
     </div>
 
     <!-- ─ Create form (instructor provisioning) ─ -->
     <div class="card create-card">
-      <div class="card-label">CREATE ACCOUNT</div>
+      <div class="card-label">{{ t('createAccountTitle') }}</div>
       <form class="create-form" @submit.prevent="createUser">
-        <input v-model="form.username" class="field" type="text" placeholder="Username" autocomplete="off" />
-        <input v-model="form.password" class="field" type="password" placeholder="Password" autocomplete="new-password" />
+        <input v-model="form.username" class="field" type="text" :placeholder="t('username')" autocomplete="off" />
+        <input v-model="form.password" class="field" type="password" :placeholder="t('password')" autocomplete="new-password" />
         <select v-model="form.role" class="field field--select" aria-label="Role">
           <option v-for="r in ROLE_OPTIONS" :key="r.value" :value="r.value">{{ r.label }}</option>
         </select>
         <button class="btn btn-primary" type="submit" :disabled="creating">
-          {{ creating ? 'Creating…' : 'Create' }}
+          {{ creating ? t('creatingEllipsis') : t('createBtn') }}
         </button>
       </form>
       <div v-if="formError" class="form-error">{{ formError }}</div>
-      <div class="hint">Instructors (co-admin) manage their own clients and student logins; students (user) only sign in and sit. Creating a student here also adds a linked client record to your cohort.</div>
+      <div class="hint">{{ t('createAccountHint') }}</div>
     </div>
 
     <!-- ─ User list ─ -->
     <div class="card">
-      <div class="card-label">ALL ACCOUNTS</div>
+      <div class="card-label">{{ t('allAccountsTitle') }}</div>
       <div v-if="error" class="empty-state">{{ error }}</div>
-      <div v-else-if="loading" class="empty-state">Loading…</div>
-      <div v-else-if="!users.length" class="empty-state">No accounts yet.</div>
+      <div v-else-if="loading" class="empty-state">{{ t('loading') }}</div>
+      <div v-else-if="!users.length" class="empty-state">{{ t('noAccountsYet') }}</div>
       <div v-else class="user-list">
         <div v-for="u in users" :key="u.id" class="user-row">
           <div class="user-row__id">
             <span class="user-row__name">{{ u.username }}</span>
             <span class="user-row__meta">
-              {{ ROLE_LABEL[u.role] || u.role }} · created {{ formatDate(u.createdAt) }}
-              <template v-if="isSelf(u)"> · you</template>
+              {{ ROLE_LABEL[u.role] || u.role }} · {{ t('createdPrefix') }}{{ formatDate(u.createdAt) }}
+              <template v-if="isSelf(u)"> · {{ t('youBadge') }}</template>
             </span>
           </div>
           <div class="user-row__actions">
@@ -172,7 +175,7 @@ async function deleteUser(u) {
               class="field field--select field--sm"
               :value="u.role"
               :disabled="isSelf(u)"
-              :title="isSelf(u) ? 'You cannot change your own role' : 'Change role'"
+              :title="isSelf(u) ? t('cannotChangeOwnRole') : t('changeRoleTitle')"
               aria-label="Role"
               @change="changeRole(u, $event.target.value)"
             >
@@ -183,27 +186,27 @@ async function deleteUser(u) {
             <template v-if="resettingId === u.id">
               <input
                 v-model="resetValue" class="field field--sm" type="password"
-                placeholder="New password (min 6)" autocomplete="new-password"
+                :placeholder="t('newPasswordMin6Placeholder')" autocomplete="new-password"
                 @keydown.enter.prevent="saveReset(u)" @keydown.esc="cancelReset"
               />
               <button class="btn btn-primary btn-sm" :disabled="resetSaving" @click="saveReset(u)">
-                {{ resetSaving ? 'Saving…' : 'Save' }}
+                {{ resetSaving ? t('savingEllipsis') : t('saveBtn') }}
               </button>
-              <button class="btn btn-ghost btn-sm" @click="cancelReset">Cancel</button>
+              <button class="btn btn-ghost btn-sm" @click="cancelReset">{{ t('cancelBtn') }}</button>
               <span v-if="resetError" class="reset-error">{{ resetError }}</span>
             </template>
             <template v-else>
               <button class="btn btn-ghost btn-sm" @click="openReset(u)">
-                {{ resetDone === u.id ? '✓ Password set' : 'Reset password' }}
+                {{ resetDone === u.id ? t('passwordSetDone') : t('resetPasswordBtn') }}
               </button>
             </template>
 
             <button
               class="btn btn-ghost btn-sm btn-danger"
               :disabled="isSelf(u)"
-              :title="isSelf(u) ? 'You cannot delete your own account' : 'Delete account'"
+              :title="isSelf(u) ? t('cannotDeleteOwnAccount') : t('deleteAccountTitle')"
               @click="deleteUser(u)"
-            >Delete</button>
+            >{{ t('deleteBtn') }}</button>
           </div>
         </div>
       </div>
