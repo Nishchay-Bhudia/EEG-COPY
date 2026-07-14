@@ -9,19 +9,22 @@
 // advances the index; it is cleared on unmount.
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { api } from '@/lib/api';
+import { useI18n } from '@/composables/useI18n';
+
+const { t, tf, localizeNumber, translateState, translateSwaraNadi, translateGunaLabel } = useI18n();
 
 // ── helpers (ported from app.js) ──────────────────────────────────────────
 function formatDuration(secs) {
   if (!secs) return '—';
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  return `${m}m ${s}s`;
+  return `${localizeNumber(m)}m ${localizeNumber(s)}s`;
 }
 function formatTime(seconds) {
   if (seconds == null) return '—';
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
+  return `${localizeNumber(m)}:${localizeNumber(String(s).padStart(2, '0'))}`;
 }
 function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
@@ -45,27 +48,27 @@ const currentEpoch = computed(() => replayEpochs.value[replayIndex.value] || nul
 const maxIndex = computed(() => Math.max(0, replayEpochs.value.length - 1));
 
 const epochLabel = computed(() =>
-  hasData.value ? `${replayIndex.value + 1} / ${replayEpochs.value.length}` : '—');
+  hasData.value ? `${localizeNumber(replayIndex.value + 1)} / ${localizeNumber(replayEpochs.value.length)}` : '—');
 const timeLabel = computed(() => {
   const ep = currentEpoch.value;
   return ep && ep.elapsedSeconds != null ? formatTime(ep.elapsedSeconds) : '—';
 });
 
 // per-epoch state readout — bound directly from the current epoch
-const stateVal = computed(() => currentEpoch.value?.chittaBhumi || '—');
-const swaraVal = computed(() => currentEpoch.value?.swara || '—');
-const gunaVal = computed(() => currentEpoch.value?.gunas?.label || '—');
+const stateVal = computed(() => currentEpoch.value?.chittaBhumi ? translateState(currentEpoch.value.chittaBhumi) : '—');
+const swaraVal = computed(() => currentEpoch.value?.swara ? translateSwaraNadi(currentEpoch.value.swara) : '—');
+const gunaVal = computed(() => currentEpoch.value?.gunas?.label ? translateGunaLabel(currentEpoch.value.gunas.label) : '—');
 const alphaVal = computed(() => {
   const a = currentEpoch.value?.bands?.alpha;
-  return a != null ? Math.round(a * 100) + '%' : '—';
+  return a != null ? localizeNumber(Math.round(a * 100)) + '%' : '—';
 });
 const spo2Val = computed(() => {
   const v = currentEpoch.value?.bloodOxygen;
-  return v != null ? v.toFixed(1) + '%' : '—';
+  return v != null ? localizeNumber(v.toFixed(1)) + '%' : '—';
 });
 const hrVal = computed(() => {
   const v = currentEpoch.value?.heartRate;
-  return v != null ? v.toFixed(0) + ' bpm' : '—';
+  return v != null ? localizeNumber(v.toFixed(0)) + ' bpm' : '—';
 });
 
 // phase-colored scrubber segments, positioned by each phase's time span
@@ -98,11 +101,11 @@ const scrubberSegments = computed(() => {
 const metricsCells = computed(() => {
   const s = summary.value;
   return [
-    ['Dominant state', s.dominantState || '—'],
-    ['Dominant guṇa', s.dominantGuna ? capitalize(s.dominantGuna) : '—'],
-    ['Avg SpO₂', s.avgSpo2 != null ? s.avgSpo2.toFixed(1) + '%' : '—'],
-    ['Avg HR', s.avgHr != null ? Math.round(s.avgHr) + ' bpm' : '—'],
-    ['Epochs', s.totalEpochs != null ? String(s.totalEpochs) : '—'],
+    [t('dominantStateLabel'), s.dominantState ? translateState(s.dominantState) : '—'],
+    [t('dominantGunaLabel'), s.dominantGuna ? translateGunaLabel(capitalize(s.dominantGuna)) : '—'],
+    [t('avgSpo2Label'), s.avgSpo2 != null ? localizeNumber(s.avgSpo2.toFixed(1)) + '%' : '—'],
+    [t('avgHrLabel'), s.avgHr != null ? localizeNumber(Math.round(s.avgHr)) + ' bpm' : '—'],
+    [t('epochsLabel'), s.totalEpochs != null ? localizeNumber(s.totalEpochs) : '—'],
   ];
 });
 
@@ -185,7 +188,7 @@ async function loadReplayData() {
     totalSeconds.value = a.summary?.durationSeconds || 0;
     summary.value = a.summary || {};
     viewMeta.value = a.summary?.totalEpochs
-      ? `${a.summary.totalEpochs} epochs · ${formatDuration(a.summary.durationSeconds || 0)}` : '';
+      ? tf('replayViewMetaTemplate', { epochs: localizeNumber(a.summary.totalEpochs), duration: formatDuration(a.summary.durationSeconds || 0) }) : '';
   } catch { /* ignore */ }
 
   replayIndex.value = 0;
@@ -214,7 +217,7 @@ onBeforeUnmount(() => {
   <div class="replay-view">
     <header class="replay-header">
       <select class="cmd-client-select" v-model="replaySessionId" @change="onSessionChange">
-        <option v-if="!sessions.length" value="">No sessions</option>
+        <option v-if="!sessions.length" value="">{{ t('noSessionsOption') }}</option>
         <option v-for="s in sessions" :key="s.id" :value="String(s.id)">
           {{ s.name }}{{ s.activity ? ' · ' + s.activity : '' }} — {{ new Date(s.startTime).toLocaleDateString() }}
         </option>
@@ -231,13 +234,13 @@ onBeforeUnmount(() => {
 
     <div class="card replay-player">
       <div class="replay-controls">
-        <button class="btn btn-ghost btn-sm replay-btn" title="Previous"
+        <button class="btn btn-ghost btn-sm replay-btn" :title="t('replayPrev')"
                 :disabled="!hasData" @click="step(-1)">⏮</button>
         <button class="btn btn-primary btn-sm replay-btn"
                 :disabled="!hasData" @click="togglePlay">
-          {{ playing ? '⏸ Pause' : '▶ Play' }}
+          {{ playing ? t('pauseLabel') : t('playLabel') }}
         </button>
-        <button class="btn btn-ghost btn-sm replay-btn" title="Next"
+        <button class="btn btn-ghost btn-sm replay-btn" :title="t('replayNext')"
                 :disabled="!hasData" @click="step(1)">⏭</button>
         <select class="cmd-client-select replay-speed" title="Playback speed"
                 v-model="speed" @change="onSpeedChange">
@@ -264,32 +267,32 @@ onBeforeUnmount(() => {
 
       <div class="replay-state-display" v-if="hasData">
         <div class="replay-state-row">
-          <span class="replay-state-key">State</span>
+          <span class="replay-state-key">{{ t('replayState') }}</span>
           <span class="replay-state-val">{{ stateVal }}</span>
         </div>
         <div class="replay-state-row">
-          <span class="replay-state-key">Swara</span>
+          <span class="replay-state-key">{{ t('replaySwara') }}</span>
           <span class="replay-state-val">{{ swaraVal }}</span>
         </div>
         <div class="replay-state-row">
-          <span class="replay-state-key">Dominant Guna</span>
+          <span class="replay-state-key">{{ t('replayGuna') }}</span>
           <span class="replay-state-val">{{ gunaVal }}</span>
         </div>
         <div class="replay-state-row">
-          <span class="replay-state-key">Alpha Power</span>
+          <span class="replay-state-key">{{ t('replayAlpha') }}</span>
           <span class="replay-state-val">{{ alphaVal }}</span>
         </div>
         <div class="replay-state-row">
-          <span class="replay-state-key">SpO₂</span>
+          <span class="replay-state-key">{{ t('replaySpo2') }}</span>
           <span class="replay-state-val">{{ spo2Val }}</span>
         </div>
         <div class="replay-state-row">
-          <span class="replay-state-key">Heart Rate</span>
+          <span class="replay-state-key">{{ t('replayHr') }}</span>
           <span class="replay-state-val">{{ hrVal }}</span>
         </div>
       </div>
 
-      <div class="replay-no-data" v-else>No epoch data available for this session.</div>
+      <div class="replay-no-data" v-else>{{ t('replayNoData') }}</div>
     </div>
   </div>
 </template>

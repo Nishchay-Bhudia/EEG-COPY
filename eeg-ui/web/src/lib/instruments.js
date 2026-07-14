@@ -3,6 +3,18 @@
 // <svg :viewBox="VIEWBOX.xxx">). No DOM, no Vue. Math ported verbatim from the
 // legacy app.js draw* functions (drawBandRadar / drawGunaTriangle / drawBhumiRing
 // / drawSwaraGauge / drawDepthMeter / drawSensorSchematic).
+//
+// Text labels are translated the same way as the legacy version: t()/tf() are
+// called live at generation time, so calling these from a Vue computed() makes
+// the computed reactively depend on the current language (Vue tracks the ref
+// read through the nested call, same call stack).
+import { useI18n } from '@/composables/useI18n';
+
+const { t, tf, translateState, translateDepth, translateSwaraNadi, localizeNumber } = useI18n();
+const capitalize = s => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+// v-html strings must be escaped manually — Vue does not sanitize v-html.
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const BAND_NAME_KEYS = { delta: 'bandDelta', theta: 'bandTheta', alpha: 'bandAlpha', beta: 'bandBeta', gamma: 'bandGamma' };
 
 // ── viewBox map (matches legacy index.html <svg viewBox> values) ─────────────
 export const VIEWBOX = {
@@ -36,9 +48,6 @@ function anArcSeg(cx, cy, rO, rI, a0, a1) {
   const f = n => n.toFixed(2);
   return `M${f(x0)} ${f(y0)} A${rO} ${rO} 0 ${large} 1 ${f(x1)} ${f(y1)} L${f(x2)} ${f(y2)} A${rI} ${rI} 0 ${large} 0 ${f(x3)} ${f(y3)} Z`;
 }
-// Local escape — these are v-html strings, so untrusted labels (state names)
-// must still be escaped before injection (Vue does NOT sanitize v-html).
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 // ── instruments ──────────────────────────────────────────────────────────────
 export function bandRadar(avgBands) {
@@ -54,7 +63,7 @@ export function bandRadar(avgBands) {
     const [ax, ay] = anPol(0, 0, maxR, ang(i));
     svg += `<line x1="0" y1="0" x2="${ax.toFixed(1)}" y2="${ay.toFixed(1)}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>`;
     const [lx, ly] = anPol(0, 0, maxR + 17, ang(i));
-    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${b}</text>`;
+    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${esc(t(BAND_NAME_KEYS[b]))}</text>`;
   });
   const dpts = bands.map((b, i) => anPol(0, 0, maxR * Math.max(0, Math.min(1, anNum(avgBands[b]))), ang(i)).map(v => v.toFixed(1)).join(',')).join(' ');
   svg += `<polygon points="${dpts}" fill="var(--accent)" fill-opacity="0.28" stroke="var(--accent)" stroke-width="2"/>`;
@@ -72,7 +81,7 @@ export function gunaTriangle(g) {
   for (const k of ['sattva', 'rajas', 'tamas']) {
     const [vx, vy] = V[k], lx = vx * 1.16, ly = vy === -90 ? vy - 9 : vy + 18;
     svg += `<circle cx="${vx}" cy="${vy}" r="4" fill="${AN_GUNA_COLORS[k]}"/>`;
-    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${k}</text>`;
+    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${esc(t(k))}</text>`;
   }
   const s = anNum(g.sattva), r = anNum(g.rajas), t = anNum(g.tamas), sum = s + r + t;
   if (sum > 0) {
@@ -80,7 +89,7 @@ export function gunaTriangle(g) {
     const py = (s * V.sattva[1] + r * V.rajas[1] + t * V.tamas[1]) / sum;
     svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="1.5"/>`;
   } else {
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">no guṇa data</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">${esc(t('noGunaData'))}</text>`;
   }
   return svg;
 }
@@ -94,23 +103,23 @@ export function bhumiRing(counts) {
   let svg = '';
   if (!sum) {
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="var(--bg-card-2)" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">no data</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">${esc(t('noDataLower'))}</text>`;
   } else if (entries.length === 1) {
     const [k] = entries[0];
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="${AN_BHUMI_COLORS[k] || 'var(--accent)'}" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${esc(k)}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">100%</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${esc(translateState(k))}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${localizeNumber(100)}%</text>`;
   } else {
     let a0 = -90;
     entries.forEach(([k, c]) => {
       const sweep = c / sum * 360, a1 = a0 + sweep, col = AN_BHUMI_COLORS[k] || 'var(--text-muted)';
       svg += `<path d="${anArcSeg(0, 0, rO, rI, a0, a1)}" fill="${col}"/>`;
-      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${Math.round(c / sum * 100)}%</text>`; }
+      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${localizeNumber(Math.round(c / sum * 100))}%</text>`; }
       a0 = a1;
     });
     const dom = entries.slice().sort((a, b) => b[1] - a[1])[0][0];
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${esc(dom)}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">dominant</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${esc(translateState(dom))}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${esc(t('dominantSuffix'))}</text>`;
   }
   return svg;
 }
@@ -122,7 +131,7 @@ export function swaraGauge(counts) {
   let svg = '';
   if (!sum) {
     svg += `<path d="${anArcSeg(cx, cy, r, rI, 180, 360)}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">no svara data</text>`;
+    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">${esc(t('noSvaraData'))}</text>`;
   } else {
     let a0 = 180;
     order.forEach(k => { const frac = anNum(counts[k]) / sum; if (frac <= 0) return; const a1 = a0 + frac * 180; svg += `<path d="${anArcSeg(cx, cy, r, rI, a0, a1)}" fill="${AN_SWARA_COLORS[k]}"/>`; a0 = a1; });
@@ -134,7 +143,7 @@ export function swaraGauge(counts) {
   const lx = [24, 108, 188];
   order.forEach((k, i) => {
     svg += `<circle cx="${lx[i]}" cy="118" r="4" fill="${AN_SWARA_COLORS[k]}"/>`;
-    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${k} ${anNum(counts[k])}</text>`;
+    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${esc(translateSwaraNadi(capitalize(k)))} ${localizeNumber(anNum(counts[k]))}</text>`;
   });
   return svg;
 }
@@ -151,14 +160,14 @@ export function depthMeter(eps, summary) {
     AN_DEPTH_ORDER.forEach(d => { const segW = counts[d] / n * w; if (segW > 0) { svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="${h}" fill="${AN_DEPTH_COLORS[d]}"/>`; x += segW; } });
   } else {
     svg += `<rect x="${x0}" y="${y}" width="${w}" height="${h}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">no depth data</text>`;
+    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">${esc(t('noDepthData'))}</text>`;
   }
-  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(t => { const tx = x0 + (DEPTH_PCT[t] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${t}</text>`; });
+  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(dp => { const tx = x0 + (DEPTH_PCT[dp] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${esc(translateDepth(dp))}</text>`; });
   const domDepth = CHITTA_DEPTHS[summary.dominantState];
   if (domDepth && DEPTH_PCT[domDepth] != null) {
     const mx = x0 + (DEPTH_PCT[domDepth] / 100) * w;
     svg += `<polygon points="${mx.toFixed(1)},${y - 5} ${(mx - 5).toFixed(1)},${y - 13} ${(mx + 5).toFixed(1)},${y - 13}" fill="var(--text)"/>`;
-    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${esc(domDepth)}</text>`;
+    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${esc(translateDepth(domDepth))}</text>`;
   }
   return svg;
 }
@@ -176,6 +185,6 @@ export function sensorSchematic(avgBands) {
     svg += `<circle cx="${dx}" cy="${dy}" r="9" fill="${col}" fill-opacity="0.55" stroke="${col}" stroke-width="2"/>`;
     svg += `<text x="${dx}" y="${dy + 3}" fill="var(--text)" font-size="8" font-weight="700" text-anchor="middle">${lbl}</text>`;
   });
-  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? dom + ' dominant' : 'no band data'}</text>`;
+  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? esc(tf('bandDominantTemplate', { band: t(BAND_NAME_KEYS[dom]) })) : esc(t('noBandData'))}</text>`;
   return svg;
 }

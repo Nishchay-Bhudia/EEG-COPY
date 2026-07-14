@@ -18,13 +18,16 @@ import {
   depthMeter,
   sensorSchematic,
 } from '@/lib/instruments';
+import { useI18n } from '@/composables/useI18n';
+
+const { t, tf, localizeNumber, translateState } = useI18n();
 
 // ── local helper (ported verbatim from app.js formatDuration) ────────────────
 function formatDuration(secs) {
   if (!secs) return '—';
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  return `${m}m ${s}s`;
+  return `${localizeNumber(m)}m ${localizeNumber(s)}s`;
 }
 
 // ── reactive state ───────────────────────────────────────────────────────────
@@ -32,9 +35,7 @@ const sessions = ref([]);        // [{ id, name, startTime }]
 const selectedId = ref('');      // bound to the <select>
 const summary = ref(null);       // analytics.summary, or null when nothing to show
 const epochs = ref([]);          // /epochs rows (drive the depth meter)
-const emptyMessage = ref(
-  'Pick a recorded session to see its guṇa, chitta-bhūmi, svara and band-power profile.'
-);
+const emptyMessage = ref(t('analyzeEmptyHint'));
 
 // summary != null ⇒ we have epoch data → show the instrument grid.
 const hasData = computed(() => summary.value != null);
@@ -42,7 +43,11 @@ const hasData = computed(() => summary.value != null);
 const meta = computed(() => {
   const s = summary.value;
   if (!s) return '';
-  return `${s.totalEpochs} epochs · ${formatDuration(s.durationSeconds || 0)} · dominant: ${s.dominantState || '—'}`;
+  return tf('analyzeSessionMetaTemplate', {
+    epochs: localizeNumber(s.totalEpochs),
+    duration: formatDuration(s.durationSeconds || 0),
+    dominant: s.dominantState ? translateState(s.dominantState) : '—',
+  });
 });
 
 // ── instrument markup strings (bound with v-html) ────────────────────────────
@@ -66,14 +71,14 @@ async function loadSession(id) {
   try {
     const a = await api('GET', `/sessions/${id}/analytics`);
     if (!a.summary || !a.summary.totalEpochs) {
-      toEmpty('This session has no epoch data to analyze.');
+      toEmpty(t('noEpochDataToAnalyze'));
       return;
     }
     const eps = await api('GET', `/sessions/${id}/epochs`).catch(() => []);
     epochs.value = Array.isArray(eps) ? eps : [];
     summary.value = a.summary;
   } catch (err) {
-    toEmpty('Could not load analytics: ' + err.message);
+    toEmpty(t('couldNotLoadAnalytics') + err.message);
   }
 }
 
@@ -82,13 +87,13 @@ onMounted(async () => {
     const rows = await api('GET', '/sessions/mine');
     if (!rows.length) {
       sessions.value = [];
-      toEmpty('Record a session first, then analyze it here.');
+      toEmpty(t('recordSessionFirstHint'));
       return;
     }
     sessions.value = rows;
     await loadSession(String(rows[0].id));
   } catch (err) {
-    toEmpty('Could not load sessions: ' + err.message);
+    toEmpty(t('couldNotLoadSessions') + err.message);
   }
 });
 </script>
@@ -101,7 +106,7 @@ onMounted(async () => {
         :value="selectedId"
         @change="loadSession($event.target.value)"
       >
-        <option v-if="!sessions.length" value="">No sessions</option>
+        <option v-if="!sessions.length" value="">{{ t('noSessionsOption') }}</option>
         <option v-for="s in sessions" :key="s.id" :value="String(s.id)">
           {{ s.name }} — {{ new Date(s.startTime).toLocaleDateString() }}
         </option>
@@ -111,39 +116,36 @@ onMounted(async () => {
 
     <div v-if="!hasData" class="view-stub">
       <div class="view-stub__card">
-        <h2>Analyze</h2>
+        <h2>{{ t('analyzeTitle') }}</h2>
         <p>{{ emptyMessage }}</p>
       </div>
     </div>
 
     <div v-else class="analyze-grid">
       <div class="card">
-        <div class="card-label">BAND POWER SPECTRUM</div>
+        <div class="card-label">{{ t('bandSpectrumTitle') }}</div>
         <svg class="an-svg" :viewBox="VIEWBOX.bandRadar" v-html="radarSvg"></svg>
       </div>
       <div class="card">
-        <div class="card-label">TRIGUṆA BALANCE</div>
+        <div class="card-label">{{ t('trigunaBalanceTitle') }}</div>
         <svg class="an-svg" :viewBox="VIEWBOX.gunaTri" v-html="gunaSvg"></svg>
       </div>
       <div class="card">
-        <div class="card-label">CHITTA-BHŪMI DISTRIBUTION</div>
+        <div class="card-label">{{ t('bhumiDistributionTitle') }}</div>
         <svg class="an-svg" :viewBox="VIEWBOX.bhumiRing" v-html="bhumiSvg"></svg>
       </div>
       <div class="card">
-        <div class="card-label">SVARA / NĀḌĪ BALANCE</div>
+        <div class="card-label">{{ t('swaraBalanceTitle') }}</div>
         <svg class="an-svg an-svg--short" :viewBox="VIEWBOX.swaraGauge" v-html="swaraSvg"></svg>
       </div>
       <div class="card">
-        <div class="card-label">CONTEMPLATIVE DEPTH</div>
+        <div class="card-label">{{ t('contemplativeDepthTitle') }}</div>
         <svg class="an-svg an-svg--short" :viewBox="VIEWBOX.depthMeter" v-html="depthSvg"></svg>
       </div>
       <div class="card">
-        <div class="card-label">SENSOR LAYOUT</div>
+        <div class="card-label">{{ t('sensorLayoutTitle') }}</div>
         <svg class="an-svg" :viewBox="VIEWBOX.sensor" v-html="sensorSvg"></svg>
-        <p class="an-disclaimer">
-          4-channel headband. Values are whole-head averages — per-electrode
-          localization is not recorded and not implied.
-        </p>
+        <p class="an-disclaimer">{{ t('sensorDisclaimer') }}</p>
       </div>
     </div>
   </div>
