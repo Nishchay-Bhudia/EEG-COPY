@@ -7,15 +7,17 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@/lib/api';
 import { auth } from '@/lib/auth';
+import { useI18n } from '@/composables/useI18n';
 
 const router = useRouter();
+const { t, tf, localizeNumber } = useI18n();
 
 // Status metadata (shared .client-status chip + .status--* colors from base.css).
 const CLIENT_STATUS = {
-  plateau: { label: 'Plateau', cls: 'status--plateau' },
-  progress: { label: 'Progress', cls: 'status--progress' },
-  issue: { label: 'Needs attention', cls: 'status--issue' },
-  new: { label: 'New', cls: 'status--new' },
+  plateau: { labelKey: 'clientStatusPlateau', cls: 'status--plateau' },
+  progress: { labelKey: 'clientStatusProgress', cls: 'status--progress' },
+  issue: { labelKey: 'clientStatusIssue', cls: 'status--issue' },
+  new: { labelKey: 'clientStatusNew', cls: 'status--new' },
 };
 
 const clients = ref([]);
@@ -34,13 +36,13 @@ function isAttention(c) {
 // Compact, human relative time — "just now" / "12m ago" / "3h ago" / "Mar 3".
 function relTime(iso) {
   if (!iso) return '—';
-  const t = new Date(iso).getTime();
-  if (isNaN(t)) return '—';
-  const diff = (Date.now() - t) / 1000;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)}d ago`;
+  const ts = new Date(iso).getTime();
+  if (isNaN(ts)) return '—';
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return t('justNow');
+  if (diff < 3600) return tf('minAgoTemplate', { n: localizeNumber(Math.floor(diff / 60)) });
+  if (diff < 86400) return tf('hourAgoTemplate', { n: localizeNumber(Math.floor(diff / 3600)) });
+  if (diff < 7 * 86400) return tf('dayAgoTemplate', { n: localizeNumber(Math.floor(diff / 86400)) });
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
@@ -49,21 +51,21 @@ function fmtDur(secs) {
   if (!secs || secs < 1) return '—';
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
-  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
-  if (m > 0) return `${m}m`;
-  return `${Math.round(secs)}s`;
+  if (h > 0) return m > 0 ? tf('hrMinTemplate', { h: localizeNumber(h), m: localizeNumber(m) }) : tf('hrTemplate', { h: localizeNumber(h) });
+  if (m > 0) return tf('minTemplate', { m: localizeNumber(m) });
+  return tf('secTemplate', { s: localizeNumber(Math.round(secs)) });
 }
 
 // ── Greeting + date header ──
 const greeting = computed(() => {
   const h = new Date().getHours();
-  const part = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  const part = h < 12 ? t('greetingMorning') : h < 17 ? t('greetingAfternoon') : t('greetingEvening');
   const name = auth.user?.username;
   return name ? `${part}, ${name}` : part;
 });
-const todayLabel = new Date().toLocaleDateString(undefined, {
+const todayLabel = computed(() => new Date().toLocaleDateString(undefined, {
   weekday: 'long', month: 'long', day: 'numeric',
-});
+}));
 
 // ── Derived data ──
 const flagged = computed(() => clients.value.filter(isAttention));
@@ -84,40 +86,40 @@ const kpis = computed(() => {
 
   return [
     {
-      key: 'clients', glyph: '○', label: 'Clients',
-      value: clients.value.length,
-      sub: `${activeThisWeek} active this week`,
+      key: 'clients', glyph: '○', label: t('kpiClients'),
+      value: localizeNumber(clients.value.length),
+      sub: tf('activeThisWeekTemplate', { n: localizeNumber(activeThisWeek) }),
       to: '/cohort',
     },
     {
-      key: 'attention', glyph: '◎', label: 'Needs attention',
-      value: flaggedN,
-      sub: flaggedN ? 'follow up soon' : 'all on track',
+      key: 'attention', glyph: '◎', label: t('kpiNeedsAttention'),
+      value: localizeNumber(flaggedN),
+      sub: flaggedN ? t('followUpSoon') : t('allOnTrack'),
       tone: flaggedN ? 'warn' : 'ok',
       to: { path: '/cohort', query: { filter: 'attention' } },
     },
     {
-      key: 'week', glyph: '◇', label: 'Sessions this week',
-      value: week.length,
-      sub: `${all.length} all-time`,
+      key: 'week', glyph: '◇', label: t('kpiSessionsThisWeek'),
+      value: localizeNumber(week.length),
+      sub: tf('allTimeTemplate', { n: localizeNumber(all.length) }),
       to: '/replay',
     },
     {
-      key: 'practice', glyph: '☼', label: 'Practice this week',
+      key: 'practice', glyph: '☼', label: t('kpiPracticeThisWeek'),
       value: fmtDur(sumDur(week)),
-      sub: `${fmtDur(sumDur(all))} all-time`,
+      sub: tf('allTimeTemplate', { n: fmtDur(sumDur(all)) }),
       to: '/replay',
     },
     {
-      key: 'avg', glyph: '≈', label: 'Avg session',
+      key: 'avg', glyph: '≈', label: t('kpiAvgSessionLabel'),
       value: fmtDur(avgDur),
-      sub: `over ${withDur.length} sitting${withDur.length === 1 ? '' : 's'}`,
+      sub: tf('overSittingsTemplate', { n: localizeNumber(withDur.length), s: withDur.length === 1 ? '' : 's' }),
       to: '/replay',
     },
     {
-      key: 'last', glyph: '↺', label: 'Last session',
+      key: 'last', glyph: '↺', label: t('kpiLastSessionLabel'),
       value: latest ? relTime(latest.startTime) : '—',
-      sub: latest ? latest.name : 'no sessions yet',
+      sub: latest ? latest.name : t('noSessionsYetLower'),
       to: latest ? { path: '/replay', query: { session: latest.id } } : '/replay',
     },
   ];
@@ -130,8 +132,8 @@ const attentionRows = computed(() =>
     return {
       id: c.id,
       name: c.name,
-      chip: flaggedStatus ? st : { label: 'No recent session', cls: 'status--new' },
-      since: c.lastSessionAt ? `last seen ${relTime(c.lastSessionAt)}` : 'no sessions yet',
+      chip: flaggedStatus ? { label: t(st.labelKey), cls: st.cls } : { label: t('noRecentSessionChip'), cls: 'status--new' },
+      since: c.lastSessionAt ? t('lastSeenPrefix') + relTime(c.lastSessionAt) : t('noSessionsYetLower'),
     };
   })
 );
@@ -143,8 +145,8 @@ const recentRows = computed(() => {
   return sessions.value.slice(0, 8).map((s) => {
     const cn =
       s.clientId != null
-        ? byId[String(s.clientId)] || 'Unknown client'
-        : 'Unassigned';
+        ? byId[String(s.clientId)] || t('unknownClientLabel')
+        : t('unassignedLabel');
     const meta = s.activity ? `${cn} · ${s.activity}` : cn;
     return { id: s.id, name: s.name, client: meta, when: relTime(s.startTime) };
   });
@@ -179,11 +181,11 @@ onMounted(async () => {
     <header class="hero">
       <div class="hero__text">
         <h1 class="hero__greeting">{{ greeting }}</h1>
-        <p class="hero__sub">{{ todayLabel }} · your week at a glance</p>
+        <p class="hero__sub">{{ todayLabel }}{{ t('heroSubSuffix') }}</p>
       </div>
       <div class="hero__actions">
-        <router-link to="/monitor" class="btn btn-primary">Begin a sitting</router-link>
-        <router-link to="/watch" class="btn btn-secondary">Watch live</router-link>
+        <router-link to="/monitor" class="btn btn-primary">{{ t('beginSittingBtn') }}</router-link>
+        <router-link to="/watch" class="btn btn-secondary">{{ t('watchLiveBtn') }}</router-link>
       </div>
     </header>
 
@@ -210,14 +212,12 @@ onMounted(async () => {
 
     <div class="hub-cols">
       <div class="card">
-        <div class="card-label">NEEDS ATTENTION</div>
+        <div class="card-label">{{ t('needsAttention') }}</div>
         <div class="hub-list">
           <template v-if="loading">
             <div v-for="n in 3" :key="n" class="skeleton-row" />
           </template>
-          <div v-else-if="!attentionRows.length" class="empty-state">
-            All clients on track.
-          </div>
+          <div v-else-if="!attentionRows.length" class="empty-state">{{ t('allClientsOnTrack') }}</div>
           <button
             v-for="row in attentionRows"
             v-else
@@ -238,14 +238,12 @@ onMounted(async () => {
       </div>
 
       <div class="card">
-        <div class="card-label">RECENT SESSIONS</div>
+        <div class="card-label">{{ t('recentSessions') }}</div>
         <div class="hub-list">
           <template v-if="loading">
             <div v-for="n in 4" :key="n" class="skeleton-row" />
           </template>
-          <div v-else-if="!recentRows.length" class="empty-state">
-            No sessions yet.
-          </div>
+          <div v-else-if="!recentRows.length" class="empty-state">{{ t('homeNoSessionsYet') }}</div>
           <button
             v-for="row in recentRows"
             v-else

@@ -2,16 +2,17 @@
 // Prescribe view — placeholder for P4 (not yet built).
 // The legacy Prescribe is still a stub, so this renders a centered
 // "coming soon" card using the shared design tokens.
+import { useI18n } from '@/composables/useI18n';
+
+const { t } = useI18n();
 </script>
 
 <template>
   <div class="prescribe-view">
     <div class="card prescribe-card">
-      <h1 class="prescribe-title">Prescribe</h1>
-      <p class="prescribe-desc">
-        Turn a session into an AI-assisted practice recommendation.
-      </p>
-      <span class="prescribe-tag">Phase 4 — coming soon</span>
+      <h1 class="prescribe-title">{{ t('prescribeTitle') }}</h1>
+      <p class="prescribe-desc">{{ t('prescribeHint') }}</p>
+      <span class="prescribe-tag">{{ t('prescribeTag') }} — {{ t('comingSoon') }}</span>
     </div>
   </div>
 </template>
