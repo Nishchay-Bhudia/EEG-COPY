@@ -7,96 +7,6 @@
 
 'use strict';
 
-// ── Language selector (i18n.js defines I18N/t/getLang/setLang/applyI18n) ──────
-applyI18n();
-document.querySelectorAll('.lang-btn').forEach(btn => {
-  btn.addEventListener('click', () => setLang(btn.dataset.lang));
-});
-// Re-render whatever's currently on screen with the new language — state
-// names, notes, and numbers are re-applied from the same underlying reading,
-// not re-fetched, so switching is instant and never loses live data.
-function onLanguageChanged() {
-  // Topbar title is set once per nav click (showView), not part of applyReading.
-  if (typeof VIEWS !== 'undefined' && typeof currentView !== 'undefined' && currentView && VIEWS[currentView]) {
-    const titleEl = document.getElementById('topbar-title');
-    if (titleEl) titleEl.textContent = t(VIEWS[currentView].titleKey);
-  }
-  if (typeof lastAppliedReading !== 'undefined' && lastAppliedReading) {
-    applyReading(lastAppliedReading);
-  }
-  // pingBackendStatus writes "ready"/"loading model..." once at login, outside
-  // applyReading — re-run it so that text also follows a language switch
-  // (caught by actually rendering the page and screenshotting it, not just
-  // reading the code: the MODE field kept showing English "ready" after
-  // switching to Gujarati because nothing re-rendered it).
-  if (typeof backendUrl !== 'undefined' && backendUrl && typeof pingBackendStatus === 'function') {
-    pingBackendStatus(backendUrl);
-  }
-  // User-menu role label is set once in enterApp(), outside any per-view render.
-  if (typeof currentUser !== 'undefined' && currentUser && typeof translateRole === 'function') {
-    const roleEl = document.getElementById('user-menu-role');
-    if (roleEl) roleEl.textContent = translateRole(currentUser.role);
-  }
-  // Command-bar client picker and the sidebar session history are also
-  // populated once in enterApp(), outside any per-view render — refresh both
-  // (cheap idempotent GETs, no interactive state to lose) so they don't go
-  // stale after the first language switch.
-  if (typeof currentUser !== 'undefined' && currentUser) {
-    if (typeof loadClientOptions === 'function') loadClientOptions();
-    if (typeof loadSessionHistory === 'function') loadSessionHistory();
-  }
-  // Demo toggle button's label is set imperatively on click (mode === 'demo'),
-  // not re-derived from state on every render — resync it here too.
-  if (typeof mode !== 'undefined') {
-    const demoBtn = document.getElementById('btn-demo');
-    if (demoBtn) demoBtn.textContent = mode === 'demo' ? t('stopDemoLabel') : t('demoLabel');
-  }
-  // Views other than the dashboard bake translated text straight into
-  // innerHTML at render time, so switching language only takes effect there
-  // once they're re-rendered. Re-run whichever view is currently on screen —
-  // cheap idempotent GETs for the list-style views, and a same-data redraw
-  // (no re-fetch, no lost scrub position) for Replay/Analyze.
-  switch (typeof currentView !== 'undefined' ? currentView : null) {
-    case 'home':    if (typeof onShowHome === 'function') onShowHome(); break;
-    case 'cohort':  if (typeof onShowCohort === 'function') onShowCohort(); break;
-    case 'client':  if (typeof onShowClient === 'function') onShowClient(); break;
-    case 'admin':   if (typeof openAdminTab === 'function') openAdminTab(adminCurrentTab); break;
-    case 'replay':
-      if (typeof replayEpochs !== 'undefined' && replayEpochs.length && typeof updateReplayDisplay === 'function') {
-        // Render order matters: updateReplayDisplay() ends with the localizeDom
-        // sweep for the whole .replay-view, so anything digit-bearing must be
-        // (re)written before it runs, or its numerals are left un-swept.
-        if (typeof renderReplayMetrics === 'function') renderReplayMetrics(lastReplaySummary || {});
-        if (typeof renderReplayViewMeta === 'function') renderReplayViewMeta(lastReplaySummary);
-        if (typeof renderReplayScrubber === 'function') renderReplayScrubber(lastReplayPhases, lastReplaySummary?.durationSeconds || 0);
-        updateReplayDisplay(replayIndex);
-      } else if (typeof onShowReplay === 'function') {
-        // No session loaded — nothing to lose, safe to re-run in full so the
-        // "No sessions" empty state (and picker options) pick up the new language.
-        onShowReplay();
-      }
-      if (typeof replayPlaying !== 'undefined') {
-        const ppBtn = document.getElementById('replay-play-pause');
-        if (ppBtn) ppBtn.textContent = replayPlaying ? t('pauseLabel') : t('playLabel');
-      }
-      break;
-    case 'analyze':
-      if (typeof analyzeSessionId !== 'undefined' && analyzeSessionId && typeof loadAnalyzeSession === 'function') {
-        loadAnalyzeSession(analyzeSessionId);
-      }
-      break;
-  }
-  // AI Baba is a modal, not a nav view — re-fetch its session picker if that's
-  // the step showing (safe: no selection made yet, nothing to lose). Leave an
-  // in-progress chat alone rather than wiping the conversation.
-  const aiOverlay = document.getElementById('ai-baba-overlay');
-  const aiPickStep = document.getElementById('ai-baba-step-pick');
-  if (aiOverlay && aiOverlay.style.display !== 'none' && aiPickStep && aiPickStep.style.display !== 'none'
-      && typeof openAiBaba === 'function') {
-    openAiBaba();
-  }
-}
-
 // ── Constants ─────────────────────────────────────────────────────────────────
 const SAMPLE_RATE = 256;
 // Analysis window per epoch. Longer = each state reading holds longer on screen
@@ -136,23 +46,15 @@ const BRAINBIT_CMD_SIGNAL = new Uint8Array([2, 0, 0, 0, 0]); // start signal mod
 
 const DEPTH_PCT = { 'Deep Inertia': 3, Surface: 12, Emerging: 37, Deep: 62, Profound: 94 };
 const CHITTA_DEPTHS = { Mudha: 'Deep Inertia', Kshipta: 'Surface', Vikshipta: 'Emerging', Ekagra: 'Deep', Niruddha: 'Profound' };
-// Getter-based so SWARA_NOTES.ida etc always reflects the current language —
-// none of the Swara classification logic that reads these (classifyLocal) is
-// touched, only what the resulting note text resolves to.
 const SWARA_NOTES = {
-  get ida() { return t('swaraNoteIda'); },
-  get pingala() { return t('swaraNotePingala'); },
-  get sushumna() { return t('swaraNoteSushumna'); },
+  ida: 'Parasympathetic dominance. Receptive, creative and introspective state.',
+  pingala: 'Sympathetic dominance. Active, analytical and goal-directed focus.',
+  sushumna: 'Equilibrium of solar and lunar channels. Gateway to higher contemplative states.',
 };
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let mode = 'idle';
-// Default to the local .NET analyser for local dev. A stale/unreachable remote
-// default here silently degrades every reading to the local FFT fallback (no
-// gunas, no inner-texture, weaker tattva flags) with only a console warning —
-// see eeg-backend/docs/IMPLEMENTATION_PLAN.md guardrails. Override via the
-// backend-URL field in Settings for a remote deployment.
-let backendUrl = localStorage.getItem('controlhub_url') || 'http://localhost:5094';
+let backendUrl = localStorage.getItem('controlhub_url') || 'https://eeg-backend-5.onrender.com';
 let btDevice = null;
 let btDisconnect = null;
 let activeDriver = null;              // the headband driver in use this connection
@@ -205,8 +107,6 @@ let replaySpeed = 1;                 // playback multiplier (0.5×–4×)
 let replaySessionId = null;          // session shown in the Replay view
 let pendingReplaySessionId = null;   // deep-link target from the analytics overlay
 let currentAnalyticsSessionId = null;
-let lastReplaySummary = null;        // last /analytics summary, for re-translating the metrics strip in place
-let lastReplayPhases = [];           // last /analytics phases, for re-translating the scrubber tooltips in place
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -251,7 +151,7 @@ async function api(method, path, body) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch('/api' + path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw Object.assign(new Error(data.error || t('requestFailed')), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed'), { status: res.status });
   return data;
 }
 
@@ -270,14 +170,14 @@ async function checkAuth() {
 // [data-nav] sidebar button; onShow runs each time the view is entered. Later phases
 // register their render fns as onShow hooks against the stub views.
 const VIEWS = {
-  dashboard: { titleKey: 'navLiveMonitor',      onShow: onShowDashboard },
-  home:      { titleKey: 'navThisWeek',         onShow: onShowHome },
-  cohort:    { titleKey: 'navCohort',           onShow: onShowCohort },
-  client:    { titleKey: 'navClients',          onShow: onShowClient },
-  replay:    { titleKey: 'navReplay',           onShow: onShowReplay },
-  analyze:   { titleKey: 'navAnalyze',          onShow: onShowAnalyze },
-  prescribe: { titleKey: 'navPrescribe' },
-  admin:     { titleKey: 'adminDashboardTitle', elevatedOnly: true, onShow: onShowAdmin },
+  dashboard: { title: 'Live Monitor',     onShow: onShowDashboard },
+  home:      { title: 'This Week', onShow: onShowHome },
+  cohort:    { title: 'Cohort',    onShow: onShowCohort },
+  client:    { title: 'Clients',   onShow: onShowClient },
+  replay:    { title: 'Replay', onShow: onShowReplay },
+  analyze:   { title: 'Analyze', onShow: onShowAnalyze },
+  prescribe: { title: 'Prescribe' },
+  admin:     { title: 'Admin Dashboard', elevatedOnly: true, onShow: onShowAdmin },
 };
 
 let currentView = null;
@@ -298,7 +198,7 @@ function showView(name) {
   qAll('[data-view]').forEach(el => el.classList.toggle('is-active', el.dataset.view === name));
   qAll('[data-nav]').forEach(el => el.classList.toggle('is-active', el.dataset.nav === name));
   const titleEl = $('topbar-title');
-  if (titleEl) titleEl.textContent = t(view.titleKey);
+  if (titleEl) titleEl.textContent = view.title;
   currentView = name;
   if (view.onShow) view.onShow();
 }
@@ -331,7 +231,7 @@ function enterApp() {
 
   $('user-avatar-initial').textContent = (currentUser.username[0] || '?').toUpperCase();
   $('user-display-name').textContent = currentUser.username;
-  $('user-menu-role').textContent = translateRole(currentUser.role);
+  $('user-menu-role').textContent = currentUser.role;
 
   const elevated = isElevatedRole();
   $('btn-open-admin').style.display = elevated ? '' : 'none';
@@ -361,7 +261,7 @@ async function loadClientOptions() {
   try {
     const clients = await api('GET', '/clients');
     const current = sel.value;
-    sel.innerHTML = `<option value="">${escHtml(t('noClient'))}</option>` +
+    sel.innerHTML = '<option value="">No client</option>' +
       clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
     sel.value = current; // preserve selection across refreshes
   } catch (_) { /* leave the default "No client" option */ }
@@ -395,17 +295,17 @@ $('btn-login').addEventListener('click', async () => {
   const errEl = $('login-error');
   errEl.style.display = 'none';
   $('btn-login').disabled = true;
-  $('btn-login').textContent = t('signingIn');
+  $('btn-login').textContent = 'Signing in…';
 
   try {
     currentUser = await api('POST', '/auth/login', { username, password });
     enterApp();
   } catch (err) {
-    errEl.textContent = err.message || t('loginFailed');
+    errEl.textContent = err.message || 'Login failed';
     errEl.style.display = '';
   } finally {
     $('btn-login').disabled = false;
-    $('btn-login').textContent = t('signIn');
+    $('btn-login').textContent = 'Sign In';
   }
 });
 
@@ -448,24 +348,24 @@ $('settings-overlay').addEventListener('click', e => {
 $('btn-test').addEventListener('click', async () => {
   const url = $('input-backend-url').value.trim().replace(/\/$/, '');
   const testEl = $('test-msg');
-  if (!url) { alert(t('alertEnterUrl')); return; }
+  if (!url) { alert('Enter a URL first.'); return; }
   testEl.style.display = '';
   testEl.style.color = 'var(--text-muted)';
-  testEl.textContent = t('testingEllipsis');
+  testEl.textContent = 'Testing…';
   try {
     const res = await fetch(url + '/status', { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
     testEl.style.color = '#56A67A';
-    testEl.textContent = t('connectedBoardPrefix') + (data.board || 'web-bluetooth') + (data.model_ready ? t('modelReadySuffix') : t('modelLoadingSuffix'));
+    testEl.textContent = '✓ Connected — board: ' + (data.board || 'web-bluetooth') + (data.model_ready ? ' | model ready' : ' | model loading…');
   } catch (e) {
     testEl.style.color = '#C75C5C';
-    testEl.textContent = '✗ ' + (e.message || t('connectionFailed'));
+    testEl.textContent = '✗ ' + (e.message || 'connection failed');
   }
 });
 
 $('btn-save').addEventListener('click', () => {
   const url = $('input-backend-url').value.trim().replace(/\/$/, '');
-  if (!url) { alert(t('alertEnterUrl')); return; }
+  if (!url) { alert('Enter a URL first.'); return; }
   backendUrl = url;
   localStorage.setItem('controlhub_url', url);
   $('settings-overlay').classList.remove('open');
@@ -511,7 +411,7 @@ $('btn-create-user').addEventListener('click', async () => {
   errEl.style.display = 'none';
 
   if (!username || !password) {
-    errEl.textContent = t('usernamePasswordRequired');
+    errEl.textContent = 'Username and password required.';
     errEl.style.display = '';
     return;
   }
@@ -534,26 +434,26 @@ $('btn-cancel-reset-pw').addEventListener('click', () => {
 $('btn-save-reset-pw').addEventListener('click', async () => {
   if (!resetPwTargetUserId) return;
   const pw = $('reset-pw-input').value;
-  if (!pw) { alert(t('alertEnterPassword')); return; }
+  if (!pw) { alert('Enter a password.'); return; }
   try {
     await api('PUT', '/users/' + resetPwTargetUserId + '/password', { password: pw });
     $('reset-pw-form').style.display = 'none';
     resetPwTargetUserId = null;
     $('reset-pw-input').value = '';
-    alert(t('alertPasswordUpdated'));
+    alert('Password updated.');
   } catch (err) {
-    alert(t('alertErrorPrefix') + err.message);
+    alert('Error: ' + err.message);
   }
 });
 
 async function loadAdminUsers() {
   const tbody = $('admin-users-tbody');
-  tbody.innerHTML = `<tr><td colspan="5">${escHtml(t('loading'))}</td></tr>`;
+  tbody.innerHTML = '<tr><td colspan="5">Loading…</td></tr>';
   try {
     const users = await api('GET', '/users');
     tbody.innerHTML = '';
     if (!users.length) {
-      tbody.innerHTML = `<tr><td colspan="5">${escHtml(t('noUsersFound'))}</td></tr>`;
+      tbody.innerHTML = '<tr><td colspan="5">No users found.</td></tr>';
       return;
     }
     users.forEach(u => {
@@ -561,17 +461,17 @@ async function loadAdminUsers() {
       const roleClass = 'role-' + u.role.replace('-', '_');
       const roleSelector = !isSelf ? `
         <select class="field-input field-input-xs" data-action="select-role">
-          <option value="user" ${u.role==='user'?'selected':''}>${escHtml(t('adminRoleUser'))}</option>
-          <option value="co-admin" ${u.role==='co-admin'?'selected':''}>${escHtml(t('adminRoleCoAdmin'))}</option>
-          <option value="admin" ${u.role==='admin'?'selected':''}>${escHtml(t('adminRoleAdmin'))}</option>
+          <option value="user" ${u.role==='user'?'selected':''}>user</option>
+          <option value="co-admin" ${u.role==='co-admin'?'selected':''}>co-admin</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
         </select>
-        <button class="btn btn-primary btn-sm" data-action="change-role" data-uid="${u.id}">${escHtml(t('btnApply'))}</button>
+        <button class="btn btn-primary btn-sm" data-action="change-role" data-uid="${u.id}">Apply</button>
       ` : '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td><strong>${escHtml(u.username)}</strong></td>
-        <td><span class="role-badge ${roleClass}">${escHtml(translateRole(u.role))}</span></td>
+        <td><span class="role-badge ${roleClass}">${escHtml(u.role)}</span></td>
         <td>${formatDate(u.createdAt)}</td>
         <td>
           <div class="table-actions">
@@ -580,16 +480,15 @@ async function loadAdminUsers() {
         </td>
         <td>
           <div class="table-actions">
-            <button class="btn btn-ghost btn-sm" data-action="reset-pw" data-uid="${u.id}">${escHtml(t('btnResetPw'))}</button>
+            <button class="btn btn-ghost btn-sm" data-action="reset-pw" data-uid="${u.id}">Reset PW</button>
             ${!isSelf
-              ? `<button class="btn btn-danger btn-sm" data-action="delete-user" data-uid="${u.id}">${escHtml(t('btnDelete'))}</button>`
-              : `<span class="role-badge role-user">${escHtml(t('youBadge'))}</span>`}
+              ? `<button class="btn btn-danger btn-sm" data-action="delete-user" data-uid="${u.id}">Delete</button>`
+              : '<span class="role-badge role-user">you</span>'}
           </div>
         </td>
       `;
       tbody.appendChild(tr);
     });
-    localizeDom(tbody);
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="5">${escHtml(err.message)}</td></tr>`;
   }
@@ -607,24 +506,24 @@ $('admin-users-tbody').addEventListener('click', async e => {
     $('reset-pw-form').style.display = '';
     $('reset-pw-input').focus();
   } else if (action === 'delete-user') {
-    if (!confirm(t('confirmDeleteUser'))) return;
+    if (!confirm('Delete this user? This cannot be undone.')) return;
     try {
       await api('DELETE', '/users/' + uid);
       await loadAdminUsers();
     } catch (err) {
-      alert(t('alertErrorPrefix') + err.message);
+      alert('Error: ' + err.message);
     }
   } else if (action === 'change-role') {
     const row = btn.closest('tr');
     const select = row.querySelector('[data-action="select-role"]');
     if (!select) return;
     const newRole = select.value;
-    if (!confirm(tf('confirmChangeRole', { role: translateRole(newRole) }))) return;
+    if (!confirm(`Change this user's role to "${newRole}"?`)) return;
     try {
       await api('PUT', '/users/' + uid + '/role', { role: newRole });
       await loadAdminUsers();
     } catch (err) {
-      alert(t('alertErrorPrefix') + err.message);
+      alert('Error: ' + err.message);
     }
   }
 });
@@ -640,12 +539,12 @@ $('admin-sessions-search').addEventListener('input', e => {
 
 async function loadAdminSessions() {
   const tbody = $('admin-sessions-tbody');
-  tbody.innerHTML = `<tr><td colspan="6">${escHtml(t('loading'))}</td></tr>`;
+  tbody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
   try {
     const sessions = await api('GET', '/sessions');
     tbody.innerHTML = '';
     if (!sessions.length) {
-      tbody.innerHTML = `<tr><td colspan="6">${escHtml(t('noSessionsYetAdmin'))}</td></tr>`;
+      tbody.innerHTML = '<tr><td colspan="6">No sessions yet.</td></tr>';
       return;
     }
     sessions.forEach(s => {
@@ -655,25 +554,24 @@ async function loadAdminSessions() {
         <td data-username="${escHtml(s.username || '')}">${escHtml(s.username || '?')}</td>
         <td><strong>${escHtml(s.name)}</strong></td>
         <td>${formatDate(s.startTime)}</td>
-        <td>${s.duration ? formatDuration(s.duration) : (s.endTime ? '—' : `<em>${escHtml(t('activeLabel'))}</em>`)}</td>
+        <td>${s.duration ? formatDuration(s.duration) : (s.endTime ? '—' : '<em>active</em>')}</td>
         <td><span class="epoch-badge" id="epoch-count-${s.id}">—</span></td>
         <td>
           <button class="btn btn-secondary btn-sm" data-action="view-analytics" data-sid="${s.id}" data-sname="${escHtml(s.name)}">
-            ${escHtml(t('btnViewAnalytics'))}
+            View Analytics
           </button>
         </td>
       `;
       tbody.appendChild(tr);
     });
 
-    localizeDom(tbody);
-    loadEpochCounts(sessions, tbody);
+    loadEpochCounts(sessions);
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="6">${escHtml(err.message)}</td></tr>`;
   }
 }
 
-async function loadEpochCounts(sessions, tbody) {
+async function loadEpochCounts(sessions) {
   await Promise.allSettled(sessions.map(async s => {
     try {
       const data = await api('GET', '/sessions/' + s.id + '/analytics');
@@ -681,7 +579,6 @@ async function loadEpochCounts(sessions, tbody) {
       if (el) el.textContent = data.summary?.totalEpochs ?? 0;
     } catch { /* ignore */ }
   }));
-  if (tbody) localizeDom(tbody);
 }
 
 $('admin-sessions-tbody').addEventListener('click', async e => {
@@ -714,7 +611,7 @@ function setAnalyticsState(state) {
 
 async function openSessionAnalytics(sessionId, sessionName) {
   currentAnalyticsSessionId = sessionId;
-  $('analytics-session-name').textContent = sessionName || t('aiBabaSessionFallbackName');
+  $('analytics-session-name').textContent = sessionName || 'Session';
   $('analytics-session-meta').textContent = '';
   $('analytics-overlay').style.display = '';
   setAnalyticsState('loading');
@@ -725,7 +622,6 @@ async function openSessionAnalytics(sessionId, sessionName) {
     renderAnalyticsTimeline(data.phases || []);
     setAnalyticsState('content');
     loadAnalyticsNotes(sessionId);
-    localizeDom(document.querySelector('.analytics-panel'));
   } catch (err) {
     $('analytics-error').textContent = err.message;
     setAnalyticsState('error');
@@ -735,52 +631,50 @@ async function openSessionAnalytics(sessionId, sessionName) {
 function pct(v) { return v != null ? Math.round(v * 100) + '%' : '—'; }
 
 function renderAnalyticsSummary(s) {
-  $('a-total-epochs').textContent = s.totalEpochs != null ? localizeNumber(s.totalEpochs) : '—';
+  $('a-total-epochs').textContent = s.totalEpochs ?? '—';
   $('a-duration').textContent = s.durationSeconds ? formatDuration(s.durationSeconds) : '—';
-  $('a-dominant-guna').textContent = s.dominantGuna ? t(s.dominantGuna.toLowerCase()) : '—'; // 'sattva'/'rajas'/'tamas' key
-  $('a-dominant-state').textContent = s.dominantState ? translateState(s.dominantState) : '—';
-  $('a-avg-spo2').textContent = s.avgSpo2 != null ? localizeNumber(s.avgSpo2.toFixed(1)) : '—';
-  $('a-avg-hr').textContent = s.avgHr != null ? localizeNumber(s.avgHr.toFixed(0)) : '—';
+  $('a-dominant-guna').textContent = s.dominantGuna ? capitalize(s.dominantGuna) : '—';
+  $('a-dominant-state').textContent = s.dominantState ?? '—';
+  $('a-avg-spo2').textContent = s.avgSpo2 != null ? s.avgSpo2.toFixed(1) : '—';
+  $('a-avg-hr').textContent = s.avgHr != null ? s.avgHr.toFixed(0) : '—';
 
   const gunas = s.avgGunas || {};
   ['sattva', 'rajas', 'tamas'].forEach(g => {
     const barEl = $('a-bar-' + g);
     const pctEl = $('a-pct-' + g);
     if (barEl) barEl.style.width = (gunas[g] != null ? Math.round(gunas[g] * 100) : 0) + '%';
-    if (pctEl) pctEl.textContent = localizeNumber(pct(gunas[g]));
+    if (pctEl) pctEl.textContent = pct(gunas[g]);
   });
 
-  renderBreakdown('a-state-breakdown', s.stateCounts || {}, s.totalEpochs || 0, translateState);
-  renderBreakdown('a-swara-breakdown', s.swaraCounts || {}, s.totalEpochs || 0, translateSwaraNadi);
+  renderBreakdown('a-state-breakdown', s.stateCounts || {}, s.totalEpochs || 0);
+  renderBreakdown('a-swara-breakdown', s.swaraCounts || {}, s.totalEpochs || 0);
 
   const bandsEl = $('a-avg-bands');
   if (bandsEl) {
     const syms = { delta: 'δ', theta: 'θ', alpha: 'α', beta: 'β', gamma: 'γ' };
-    const nameKeys = { delta: 'bandDelta', theta: 'bandTheta', alpha: 'bandAlpha', beta: 'bandBeta', gamma: 'bandGamma' };
     const avgBands = s.avgBands || {};
     bandsEl.innerHTML = ['delta', 'theta', 'alpha', 'beta', 'gamma'].map(b => `
       <div class="analytics-band-pill">
         <span class="analytics-band-sym">${syms[b]}</span>
-        <span class="analytics-band-name">${escHtml(t(nameKeys[b]))}</span>
-        <span class="analytics-band-val">${localizeNumber(pct(avgBands[b]))}</span>
+        <span class="analytics-band-name">${b}</span>
+        <span class="analytics-band-val">${pct(avgBands[b])}</span>
       </div>
     `).join('');
   }
 }
 
-function renderBreakdown(containerId, counts, total, translateLabel) {
+function renderBreakdown(containerId, counts, total) {
   const el = $(containerId);
   if (!el) return;
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) { el.innerHTML = `<p style="color:var(--text-muted);font-size:12px">${escHtml(t('noDataDot'))}</p>`; return; }
+  if (!entries.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No data.</p>'; return; }
   el.innerHTML = entries.map(([label, count]) => {
     const p = total ? Math.round((count / total) * 100) : 0;
-    const displayLabel = translateLabel ? translateLabel(label) : label;
     return `
       <div class="breakdown-item">
-        <span class="breakdown-label">${escHtml(displayLabel)}</span>
+        <span class="breakdown-label">${escHtml(label)}</span>
         <div class="breakdown-bar-bg"><div class="breakdown-bar" style="width:${p}%"></div></div>
-        <span class="breakdown-pct">${localizeNumber(p)}%</span>
+        <span class="breakdown-pct">${p}%</span>
       </div>
     `;
   }).join('');
@@ -791,13 +685,13 @@ function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; 
 function renderAnalyticsTimeline(phases) {
   const el = $('a-timeline');
   if (!el) return;
-  if (!phases.length) { el.innerHTML = `<p style="color:var(--text-muted);font-size:12px">${escHtml(t('noPhaseDataDot'))}</p>`; return; }
+  if (!phases.length) { el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">No phase data.</p>'; return; }
   el.innerHTML = phases.map(p => `
     <div class="timeline-phase">
-      <strong>${escHtml(translateState(p.state))}</strong>
-      <span>${escHtml(p.depth ? translateDepth(p.depth) : '')}</span>
+      <strong>${escHtml(p.state)}</strong>
+      <span>${escHtml(p.depth || '')}</span>
       <span>${formatTime(p.fromSeconds)} – ${formatTime(p.toSeconds)}</span>
-      <span>${localizeNumber(p.epochCount)} ${p.epochCount !== 1 ? t('aiBabaEpochPlural') : t('aiBabaEpochSingular')}</span>
+      <span>${p.epochCount} epochs</span>
     </div>
   `).join('');
 }
@@ -810,165 +704,11 @@ async function loadAnalyticsNotes(sessionId) {
     const data = await api('GET', '/sessions/' + sessionId + '/notes');
     el.innerHTML = data.content
       ? escHtml(data.content).replace(/\n/g, '<br>')
-      : `<em class="analytics-notes-empty">${escHtml(t('noNotesRecorded'))}</em>`;
+      : '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
   } catch {
-    el.innerHTML = `<em class="analytics-notes-empty">${escHtml(t('noNotesRecorded'))}</em>`;
+    el.innerHTML = '<em class="analytics-notes-empty">No notes recorded for this session.</em>';
   }
 }
-
-// ── Session export (.txt) — full per-epoch data for offline classifier
-// calibration. Kept deliberately in plain, untranslated, consistently-
-// formatted terms regardless of UI language (this is meant to be read by a
-// person doing careful analysis across states/features, not displayed in the
-// app), and includes a blank line per epoch for the user to hand-annotate
-// what they were actually doing/experiencing before feeding the file back in.
-function fmtExportNum(v, digits) {
-  return (v == null || v === '' || isNaN(v)) ? '—' : Number(v).toFixed(digits ?? 3);
-}
-
-// Chitta Bhumi probabilities are inconsistently shaped across the three
-// analysis paths — demo and the backend-relay path send raw 0-1 floats,
-// the local-FFT fallback sends pre-formatted "82.4%" strings. Normalize
-// both into the same percentage display rather than let fmtExportNum
-// silently blank out the already-formatted strings (Number("82.4%") is NaN).
-function fmtExportProb(v) {
-  if (v == null || v === '') return '—';
-  if (typeof v === 'string') return v.includes('%') ? v : (isNaN(Number(v)) ? v : (Number(v) * 100).toFixed(1) + '%');
-  const n = Number(v);
-  return isNaN(n) ? '—' : (n * 100).toFixed(1) + '%';
-}
-
-function buildSessionExportTxt(sessionName, epochs, notes) {
-  const lines = [];
-  const sep = '='.repeat(78);
-  const dash = '-'.repeat(78);
-
-  lines.push(sep);
-  lines.push('SESSION EXPORT: ' + sessionName);
-  lines.push('Exported: ' + new Date().toLocaleString());
-  lines.push('Total epochs: ' + epochs.length);
-  lines.push(sep);
-  lines.push('');
-  lines.push('SESSION NOTES:');
-  lines.push(notes && notes.trim() ? notes.trim() : '(none)');
-  lines.push('');
-  lines.push(sep);
-  lines.push('EPOCH-BY-EPOCH DATA');
-  lines.push('Each epoch below has a blank "MY NOTES" line at the end — fill in what');
-  lines.push('you actually experienced/were doing during that epoch, then paste this');
-  lines.push('whole file back for classifier calibration analysis.');
-  lines.push(sep);
-
-  for (const ep of epochs) {
-    lines.push('');
-    lines.push(dash);
-    const elapsed = ep.elapsedSeconds != null ? formatTime(ep.elapsedSeconds) : '—';
-    lines.push(`EPOCH ${ep.epochNum}  |  t=+${elapsed}  |  recorded ${formatDate(ep.recordedAt)}  |  source: ${ep.dataQuality || '—'}`);
-    lines.push(dash);
-
-    lines.push('');
-    lines.push('CHITTA BHUMI');
-    lines.push(`  State: ${ep.chittaBhumi || '—'}   Confidence: ${ep.chittaConfidence || '—'}   Depth: ${ep.contemplativeDepth || '—'}`);
-    const probEntries = ep.probabilities && typeof ep.probabilities === 'object' ? Object.entries(ep.probabilities) : [];
-    lines.push('  Full probabilities: ' + (probEntries.length ? probEntries.map(([k, v]) => `${k}=${fmtExportProb(v)}`).join('  ') : '—'));
-
-    lines.push('');
-    lines.push('SWARA NADI');
-    lines.push(`  State: ${ep.swara || '—'}   Confidence: ${ep.swaraConfidence || '—'}`);
-    if (ep.swaraNote) lines.push(`  Note: ${ep.swaraNote}`);
-
-    lines.push('');
-    lines.push('TRIGUNAS');
-    lines.push(`  Sattva=${fmtExportNum(ep.gunas?.sattva)}  Rajas=${fmtExportNum(ep.gunas?.rajas)}  Tamas=${fmtExportNum(ep.gunas?.tamas)}  Label=${ep.gunas?.label || '—'}`);
-
-    lines.push('');
-    lines.push('BAND POWERS (relative, 0-1)');
-    lines.push(`  Delta=${fmtExportNum(ep.bands?.delta)}  Theta=${fmtExportNum(ep.bands?.theta)}  Alpha=${fmtExportNum(ep.bands?.alpha)}  LowBeta=${fmtExportNum(ep.lowBetaPower)}  HighBeta=${fmtExportNum(ep.highBetaPower)}  Beta(combined)=${fmtExportNum(ep.bands?.beta)}  Gamma=${fmtExportNum(ep.bands?.gamma)}`);
-
-    lines.push('');
-    lines.push('KEY DISCRIMINATING FEATURES');
-    lines.push(`  FAA (frontal alpha asymmetry): ${fmtExportNum(ep.faa)}`);
-    lines.push(`  PLV (phase-locking / coherence): ${fmtExportNum(ep.plv)}`);
-    lines.push(`  Vritti index: ${fmtExportNum(ep.vrittiIndex)}   Nirodha state: ${ep.nirodhaState || '—'}`);
-
-    if (ep.complexity) {
-      lines.push('');
-      lines.push('COMPLEXITY / INNER TEXTURE');
-      lines.push(`  LZiv=${fmtExportNum(ep.complexity.lziv)}  HiguchiFD=${fmtExportNum(ep.complexity.higuchiFd)}  SampleEntropy=${fmtExportNum(ep.complexity.sampleEntropy)}  PermEntropy=${fmtExportNum(ep.complexity.permEntropy)}`);
-    }
-    if (ep.aperiodic) {
-      lines.push(`  Aperiodic: exponent=${fmtExportNum(ep.aperiodic.exponent)}  offset=${fmtExportNum(ep.aperiodic.offset)}`);
-    }
-
-    lines.push('');
-    lines.push('TATTVA FLAGS');
-    lines.push('  ' + ((ep.tattvaFlags && ep.tattvaFlags.length) ? ep.tattvaFlags.join(', ') : '(none)'));
-
-    if (ep.corroboration && ep.corroboration.axes && ep.corroboration.axes.length) {
-      lines.push('');
-      lines.push('CORROBORATION (what the signals say)');
-      lines.push(`  Overall: ${ep.corroboration.concord || '—'}${ep.corroboration.indeterminate ? ' (indeterminate)' : ''}`);
-      for (const ax of ep.corroboration.axes) {
-        const agree = ax.agrees === true ? 'agrees' : ax.agrees === false ? 'disagrees' : 'neutral';
-        lines.push(`  - ${ax.axis}: ${ax.reading} (${agree})${ax.note ? ' — ' + ax.note : ''}`);
-      }
-      if (ep.corroboration.caveat) lines.push(`  Caveat: ${ep.corroboration.caveat}`);
-    }
-
-    if (ep.heartRate != null || ep.bloodOxygen != null) {
-      lines.push('');
-      lines.push('VITALS');
-      lines.push(`  Heart rate: ${ep.heartRate != null ? ep.heartRate + ' bpm' : '—'}   SpO2: ${ep.bloodOxygen != null ? ep.bloodOxygen + '%' : '—'}`);
-    }
-
-    lines.push('');
-    lines.push('MY NOTES FOR THIS EPOCH: ______________________________________________');
-  }
-
-  lines.push('');
-  lines.push(sep);
-  lines.push('END OF EXPORT');
-  lines.push(sep);
-
-  return lines.join('\n');
-}
-
-function downloadTextFile(filename, content) {
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-async function exportSessionAsTxt() {
-  const sessionId = currentAnalyticsSessionId;
-  if (!sessionId) return;
-  const btn = $('btn-export-session');
-  const originalLabel = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = t('exportingEllipsis'); }
-  try {
-    const [epochs, notesData] = await Promise.all([
-      api('GET', '/sessions/' + sessionId + '/epochs'),
-      api('GET', '/sessions/' + sessionId + '/notes').catch(() => ({ content: '' })),
-    ]);
-    const sessionName = (($('analytics-session-name') && $('analytics-session-name').textContent) || 'Session').trim();
-    const txt = buildSessionExportTxt(sessionName, epochs, notesData?.content || '');
-    const safeName = sessionName.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60) || 'session';
-    downloadTextFile(safeName + '_export.txt', txt);
-  } catch (err) {
-    showToast(t('exportFailedPrefix') + err.message);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
-  }
-}
-
-const btnExportSession = $('btn-export-session');
-if (btnExportSession) btnExportSession.addEventListener('click', exportSessionAsTxt);
 
 // ── Replay Player ─────────────────────────────────────────────────────────────
 $('replay-prev').addEventListener('click', () => { updateReplayDisplay(replayIndex - 1); });
@@ -1006,7 +746,7 @@ async function onShowReplay() {
   if (!sel) return;
   try {
     const sessions = await api('GET', '/sessions/mine');
-    if (!sessions.length) { sel.innerHTML = `<option value="">${escHtml(t('noSessionsOption'))}</option>`; replaySessionId = null; showReplayNoData(); return; }
+    if (!sessions.length) { sel.innerHTML = '<option value="">No sessions</option>'; replaySessionId = null; showReplayNoData(); return; }
     sel.innerHTML = sessions.map(s =>
       `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
     const target = pendingReplaySessionId || replaySessionId || sessions[0].id;
@@ -1024,7 +764,7 @@ function startReplay() {
   // If parked at the end, restart from the top instead of dead-stopping.
   if (replayIndex >= replayEpochs.length - 1) updateReplayDisplay(0);
   replayPlaying = true;
-  $('replay-play-pause').textContent = t('pauseLabel');
+  $('replay-play-pause').textContent = '⏸ Pause';
   replayTimer = setInterval(() => {
     if (replayIndex >= replayEpochs.length - 1) { stopReplay(); return; }
     updateReplayDisplay(replayIndex + 1);
@@ -1034,7 +774,7 @@ function startReplay() {
 function stopReplay() {
   replayPlaying = false;
   clearInterval(replayTimer); replayTimer = null;
-  $('replay-play-pause').textContent = t('playLabel');
+  $('replay-play-pause').textContent = '▶ Play';
 }
 
 async function loadReplayData() {
@@ -1059,16 +799,12 @@ async function loadReplayData() {
   // Session-level readout: phase scrubber + honest metrics strip from /analytics.
   try {
     const a = await api('GET', '/sessions/' + sid + '/analytics');
-    lastReplaySummary = a.summary || null;
-    lastReplayPhases = a.phases || [];
-    renderReplayScrubber(lastReplayPhases, a.summary?.durationSeconds || 0);
+    renderReplayScrubber(a.phases || [], a.summary?.durationSeconds || 0);
     renderReplayMetrics(a.summary || {});
-    renderReplayViewMeta(a.summary || null);
-  } catch {
-    lastReplaySummary = null;
-    lastReplayPhases = [];
-    /* scrubber/metrics are enrichments — replay still works without them */
-  }
+    const metaEl = $('replay-view-meta');
+    if (metaEl) metaEl.textContent = a.summary?.totalEpochs
+      ? `${a.summary.totalEpochs} epochs · ${formatDuration(a.summary.durationSeconds || 0)}` : '';
+  } catch { /* scrubber/metrics are enrichments — replay still works without them */ }
 
   if (!replayEpochs.length) { showReplayNoData(); return; }
 
@@ -1093,7 +829,7 @@ function renderReplayScrubber(phases, totalSeconds) {
     const left = Math.max(0, Math.min(100, from / total * 100));
     const width = Math.max(0.5, Math.min(100 - left, (to - from) / total * 100));
     const col = colors[p.state] || 'var(--text-muted)';
-    return `<span class="scrubber__phase" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${col}" title="${escHtml(translateState(p.state))}"></span>`;
+    return `<span class="scrubber__phase" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${col}" title="${escHtml(p.state)}"></span>`;
   }).join('');
 }
 
@@ -1102,22 +838,14 @@ function renderReplayMetrics(s) {
   const strip = $('replay-metrics');
   if (!strip) return;
   const cells = [
-    [t('dominantStateLabel'), s.dominantState ? translateState(s.dominantState) : '—'],
-    [t('dominantGunaLabel'), s.dominantGuna ? t(s.dominantGuna.toLowerCase()) : '—'],
-    [t('avgSpo2Label'), s.avgSpo2 != null ? localizeNumber(s.avgSpo2.toFixed(1)) + '%' : '—'],
-    [t('avgHrLabel'), s.avgHr != null ? localizeNumber(Math.round(s.avgHr)) + ' bpm' : '—'],
-    [t('epochsLabel'), s.totalEpochs != null ? localizeNumber(s.totalEpochs) : '—'],
+    ['Dominant state', s.dominantState || '—'],
+    ['Dominant guṇa', s.dominantGuna ? capitalize(s.dominantGuna) : '—'],
+    ['Avg SpO₂', s.avgSpo2 != null ? s.avgSpo2.toFixed(1) + '%' : '—'],
+    ['Avg HR', s.avgHr != null ? Math.round(s.avgHr) + ' bpm' : '—'],
+    ['Epochs', s.totalEpochs != null ? String(s.totalEpochs) : '—'],
   ];
   strip.innerHTML = cells.map(([k, v]) =>
     `<div class="metrics-strip__cell"><span class="metrics-strip__label">${k}</span><span class="metrics-strip__value">${escHtml(String(v))}</span></div>`).join('');
-}
-
-function renderReplayViewMeta(summary) {
-  const metaEl = $('replay-view-meta');
-  if (!metaEl) return;
-  metaEl.textContent = summary && summary.totalEpochs
-    ? tf('replayViewMetaTemplate', { epochs: localizeNumber(summary.totalEpochs), duration: formatDuration(summary.durationSeconds || 0) })
-    : '';
 }
 
 function showReplayNoData() {
@@ -1159,15 +887,6 @@ function updateReplayDisplay(idx) {
     gunas: ep.gunas || null,
     blood_oxygen: ep.bloodOxygen,
     heart_rate: ep.heartRate,
-    vritti_index: ep.vrittiIndex ?? null,
-    nirodha_state: ep.nirodhaState || null,
-    complexity: ep.complexity ? {
-      lziv: ep.complexity.lziv,
-      higuchi_fd: ep.complexity.higuchiFd,
-      sample_entropy: ep.complexity.sampleEntropy,
-      perm_entropy: ep.complexity.permEntropy,
-    } : null,
-    aperiodic: ep.aperiodic || null,
     latency_ms: null,
     data_quality: '⏪ replay',
   });
@@ -1179,24 +898,23 @@ function updateReplayDisplay(idx) {
   const alphaValEl = $('replay-alpha-val');
   const spo2ValEl = $('replay-spo2-val');
   const hrValEl = $('replay-hr-val');
-  if (stateValEl) stateValEl.textContent = ep.chittaBhumi ? translateState(ep.chittaBhumi) : '—';
-  if (swaraValEl) swaraValEl.textContent = ep.swara ? translateSwaraNadi(ep.swara) : '—';
-  if (gunaValEl) gunaValEl.textContent = ep.gunas?.label ? translateGunaLabel(ep.gunas.label) : '—';
+  if (stateValEl) stateValEl.textContent = ep.chittaBhumi || '—';
+  if (swaraValEl) swaraValEl.textContent = ep.swara || '—';
+  if (gunaValEl) gunaValEl.textContent = ep.gunas?.label || '—';
   if (alphaValEl) alphaValEl.textContent = ep.bands?.alpha != null ? Math.round(ep.bands.alpha * 100) + '%' : '—';
   if (spo2ValEl) spo2ValEl.textContent = ep.bloodOxygen != null ? ep.bloodOxygen.toFixed(1) + '%' : '—';
   if (hrValEl) hrValEl.textContent = ep.heartRate != null ? ep.heartRate.toFixed(0) + ' bpm' : '—';
-  localizeDom(document.querySelector('.replay-view'));
 }
 
 // ── Session management ────────────────────────────────────────────────────────
 $('btn-start-session').addEventListener('click', async () => {
-  const name = prompt(t('sessionNamePrompt'), t('sessionDefaultPrefix') + new Date().toLocaleDateString());
+  const name = prompt('Session name:', 'Session ' + new Date().toLocaleDateString());
   if (name === null) return;
 
   try {
     const clientSel = $('session-client-select');
     const clientId = clientSel && clientSel.value ? clientSel.value : null;
-    const sess = await api('POST', '/sessions/start', { name: name.trim() || t('newSessionFallbackName'), client_id: clientId });
+    const sess = await api('POST', '/sessions/start', { name: name.trim() || 'New Session', client_id: clientId });
     activeSession = sess;
     sessionStartTimestamp = new Date();
     sessionEpochCounter = 0;
@@ -1211,11 +929,11 @@ $('btn-start-session').addEventListener('click', async () => {
     clearInterval(sessionTimerInterval);
     sessionTimerInterval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - sessionStartTimestamp) / 1000);
-      $('session-timer').textContent = localizeNumber(formatTime(elapsed));
+      $('session-timer').textContent = formatTime(elapsed);
     }, 1000);
-    $('session-timer').textContent = localizeNumber('0:00');
+    $('session-timer').textContent = '0:00';
   } catch (err) {
-    alert(t('failedToStartSessionPrefix') + err.message);
+    alert('Failed to start session: ' + err.message);
   }
 });
 
@@ -1252,7 +970,7 @@ async function loadSessionHistory() {
     const sessions = await api('GET', '/sessions/mine');
     list.innerHTML = '';
     if (!sessions.length) {
-      list.innerHTML = `<div id="history-empty" class="history-empty">${escHtml(t('noSessionsYet'))}</div>`;
+      list.innerHTML = '<div id="history-empty" class="history-empty">No sessions yet</div>';
       return;
     }
     sessions.slice(0, 5).forEach(s => {
@@ -1269,7 +987,7 @@ $('btn-toggle-history').addEventListener('click', () => {
   const btn = $('btn-toggle-history');
   const isHidden = list.style.display === 'none';
   list.style.display = isHidden ? '' : 'none';
-  btn.textContent = isHidden ? t('hide') : t('show');
+  btn.textContent = isHidden ? 'Hide' : 'Show';
 });
 
 // Store epoch to database (fire-and-forget)
@@ -1311,33 +1029,6 @@ function storeEpochToSession(r) {
     tattvaFlags: flags || [],
     bloodOxygen: r.blood_oxygen != null ? r.blood_oxygen : null,
     heartRate: r.heart_rate != null ? r.heart_rate : null,
-    // Inner Texture (v3 deep-state features) — previously dropped here, so
-    // Replay/Analyze always showed them empty even on a live epoch with data.
-    vrittiIndex: r.vritti_index ?? null,
-    nirodhaState: r.nirodha_state || null,
-    complexity: r.complexity ? {
-      lziv: r.complexity.lziv ?? null,
-      higuchiFd: r.complexity.higuchi_fd ?? null,
-      sampleEntropy: r.complexity.sample_entropy ?? null,
-      permEntropy: r.complexity.perm_entropy ?? null,
-    } : null,
-    aperiodic: r.aperiodic ? {
-      exponent: r.aperiodic.exponent ?? null,
-      offset: r.aperiodic.offset ?? null,
-    } : null,
-    // Full-fidelity fields for offline classifier calibration — all of these
-    // were already computed live in the reading object but silently dropped
-    // here before now, so Replay/Analyze and any future export only ever saw
-    // the winning state, never the full picture behind it.
-    probabilities: ch.probabilities || null,
-    corroboration: ch.corroboration || null,
-    faa: r.faa ?? null,
-    plv: r.connectivity?.plv ?? null,
-    lowBetaPower: spectrum.low_beta ?? null,
-    highBetaPower: spectrum.high_beta ?? null,
-    dataQuality: r.data_quality || null,
-    swaraNote: sw.note || null,
-    latencyMs: r.latency_ms ?? null,
   };
 
   api('POST', '/sessions/' + activeSession.id + '/epoch', epochBody)
@@ -1374,9 +1065,6 @@ function fft(signal) {
   return mags;
 }
 
-// Band edges match the .NET analyser's FeatureExtractor exactly (delta 0.5-4,
-// theta 4-8, alpha 8-13, low_beta 13-18, high_beta 18-30, gamma 30-50) so the
-// local fallback's Rajas marker (high-beta) lines up with the real classifier.
 function bandPowers(mags, sr, sz) {
   const res = sr / sz;
   const bin = hz => Math.round(hz / res);
@@ -1385,51 +1073,9 @@ function bandPowers(mags, sr, sz) {
     for (let b = bin(lo); b <= Math.min(bin(hi), mags.length-1); b++) s += mags[b]*mags[b];
     return s;
   };
-  const d=sum(0.5,4), t=sum(4,8), a=sum(8,13), lb=sum(13,18), hb=sum(18,30), g=sum(30,50);
-  const tot = d+t+a+lb+hb+g || 1;
-  return { delta:d/tot, theta:t/tot, alpha:a/tot, low_beta:lb/tot, high_beta:hb/tot, beta:(lb+hb)/tot, gamma:g/tot };
-}
-
-// ── Local Guna classifier — faithful port of the backend's GunaClassifier +
-// GunaBlend (eeg-backend/src/NeuroYogic.Analysis/Classification/GunaClassifier.cs,
-// GunaBlend.cs). Used only when the .NET analyser is unreachable, so this fallback
-// no longer silently drops Gunas/vṛtti — see IMPLEMENTATION_PLAN.md guardrails.
-function classifyGunasLocal(bp, faa, plv, swaraNadi) {
-  const relu = x => Math.max(0, x);
-  // v4 fix: coherence bonus gated by alpha (see GunaClassifier.cs) — a flat
-  // bonus let low-alpha/high-beta readings score falsely Sattvic off PLV alone.
-  let sat = bp.alpha*4.5 + bp.theta*2.5 + bp.low_beta*0.8 + relu(plv-0.50)*bp.alpha*7.0 + relu(0.20-Math.abs(faa))*1.5;
-  let raj = bp.high_beta*5.5 + relu(0.20-bp.alpha)*2.0 + relu(faa)*1.8 + relu(bp.gamma-0.10)*0.8;
-  let tam = bp.delta*4.5 + relu(0.15-bp.alpha)*2.5 + relu(0.06-bp.gamma)*2.0 + relu(0.45-plv)*1.0;
-
-  if (swaraNadi === 'sushumna') { sat += 0.20; raj = Math.max(0, raj-0.10); }
-  else if (swaraNadi === 'pingala') { raj += 0.15; sat = Math.max(0, sat-0.05); }
-  else if (swaraNadi === 'ida') { if (bp.delta > 0.30) tam += 0.10; else sat += 0.08; }
-
-  sat = Math.max(sat, 0.01); raj = Math.max(raj, 0.01); tam = Math.max(tam, 0.01);
-  const total = sat + raj + tam;
-  const sattva = sat/total, rajas = raj/total, tamas = tam/total;
-
-  const ranked = [['Sattva', sattva], ['Rajas', rajas], ['Tamas', tamas]].sort((a,b) => b[1]-a[1]);
-  const [g1, v1] = ranked[0], [g2] = ranked[1], [, v3] = ranked[2];
-  const adj = { Sattva: 'Sattvic', Rajas: 'Rajasic', Tamas: 'Tamasic' };
-  let label;
-  if (v1 - v3 < 0.12) label = 'Balanced (all three)';
-  else if (ranked[1][1] >= 0.50 * v1) label = `${adj[g1]}-predominant, ${adj[g2]}-secondary`;
-  else label = adj[g1];
-
-  return { sattva, rajas, tamas, label };
-}
-
-function pearsonCorr(a, b) {
-  const n = Math.min(a.length, b.length);
-  if (n < 2) return 0;
-  let ma=0, mb=0;
-  for (let i=0;i<n;i++){ ma+=a[i]; mb+=b[i]; }
-  ma/=n; mb/=n;
-  let num=0, da=0, db=0;
-  for (let i=0;i<n;i++){ const xa=a[i]-ma, xb=b[i]-mb; num+=xa*xb; da+=xa*xa; db+=xb*xb; }
-  return num / (Math.sqrt(da*db) || 1e-9);
+  const d=sum(0.5,4), t=sum(4,8), a=sum(8,13), be=sum(13,30), g=sum(30,50);
+  const tot = d+t+a+be+g || 1;
+  return { delta:d/tot, theta:t/tot, alpha:a/tot, beta:be/tot, gamma:g/tot };
 }
 
 function softmax(logits) {
@@ -1437,10 +1083,7 @@ function softmax(logits) {
   return ex.map(e=>e/s);
 }
 
-// `faa` and `plv` are computed by the caller from the real left/right channel
-// pair (see processBluetoothEEG) — this used to be `Math.random()`, which made
-// Swara AND every guna/vṛtti figure derived from it meaningless noise.
-function classifyLocal(bp, faa, plv) {
+function classifyLocal(bp) {
   const states = ['Kshipta','Vikshipta','Ekagra','Niruddha'];
   const logits = [
     bp.beta*3.0 + bp.gamma*1.5 - bp.alpha*1.5,
@@ -1454,13 +1097,6 @@ function classifyLocal(bp, faa, plv) {
   const probMap = {};
   states.forEach((s,i) => { probMap[s] = (probs[i]*100).toFixed(1)+'%'; });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DO NOT TOUCH — Swara/Nadi. Restored to its original form on request: this
-  // is the one reading users have confirmed feels right, so it's kept exactly
-  // as it was (random-jitter asym, ±0.04 threshold) rather than wired to the
-  // real per-channel FAA computed above. If you're tempted to "fix" this to
-  // use real FAA again, don't — ask first.
-  // ─────────────────────────────────────────────────────────────────────────
   const asym = (Math.random()-0.5) * 0.3;
   const isIda = asym < -0.04, isPingala = asym > 0.04;
   const swaraState = isIda ? 'Ida Nadi — right hemisphere dominant'
@@ -1468,24 +1104,11 @@ function classifyLocal(bp, faa, plv) {
     : 'Sushumna — both nadis balanced';
   const swaraNote = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
 
-  // Gunas/vṛtti still use the REAL per-channel FAA (not the display-only `asym`
-  // above) — the swara-secondary term in the guna formula needs the accurate
-  // nadi, since the user asked for the guna classification to be 100% accurate.
-  const swaraNadi = faa < -0.15 ? 'ida' : faa > 0.15 ? 'pingala' : 'sushumna';
-
   const tattva = [];
-  if (bp.gamma > 0.12) tattva.push('Gamma Spike');
-  if (bp.theta > 0.25 && bp.high_beta < 0.10) tattva.push('Pratyahara Window');
-  if (bp.delta > 0.35 && bp.alpha > 0.15) tattva.push('Turiya Approach');
-  if (plv > 0.80 && Math.abs(faa) < 0.10) tattva.push('Sushumna Activated');
-  if (bp.high_beta > 0.30) tattva.push('High-Beta Agitation');
-  if (bp.delta > 0.40 && bp.alpha < 0.10) tattva.push('Tamasic State');
-
-  const gunas = classifyGunasLocal(bp, faa, plv, swaraNadi);
-  // Same formula as VedanticAnalyzer.VrittiIndex.
-  const vritti = Math.max(0, Math.min(1, 1.6*bp.high_beta + 0.35*(1-plv) - 0.15));
-  const nirodhaState = vritti < 0.20 ? 'Nirodha (still)' : vritti < 0.45 ? 'Settling'
-    : vritti < 0.70 ? 'Active' : 'Vikshepa (scattered)';
+  if (bp.alpha>0.35 && bp.theta<0.25) tattva.push('Pratyahara Window');
+  if (bp.theta>0.28 && bp.alpha>0.28) tattva.push('Potential Tattva Activation');
+  if (bp.theta>0.32 && bp.delta>0.12) tattva.push('Turiya Approach');
+  if (bp.gamma>0.12) tattva.push('Gamma Spike');
 
   epoch++;
   const depth = CHITTA_DEPTHS[state];
@@ -1497,18 +1120,8 @@ function classifyLocal(bp, faa, plv) {
     band_powers: { relative: bp },
     eeg_spectrum: bp,
     alpha_asymmetry: asym,
-    // DO NOT TOUCH note above applies to alpha_asymmetry (drives the swara
-    // display/asym-thumb, deliberately the jittered value) — `faa` is a
-    // separate field carrying the REAL per-channel asymmetry already used
-    // for the actual guna/vritti math above, kept distinct so epoch export
-    // gets accurate data without changing anything about the swara display.
-    faa,
-    connectivity: { plv },
     tattva_flags: tattva,
     contemplative_depth: depth,
-    gunas,
-    vritti_index: vritti,
-    nirodha_state: nirodhaState,
   };
 }
 
@@ -1586,15 +1199,15 @@ const DEMO_CORROB = {
 $('btn-demo').addEventListener('click', () => {
   if (mode === 'demo') {
     clearInterval(demoTimer); demoTimer = null;
-    mode = 'idle'; setStatus('', t('disconnected'));
-    $('btn-demo').textContent = t('demoLabel');
+    mode = 'idle'; setStatus('', 'disconnected');
+    $('btn-demo').textContent = '▶ Demo';
     return;
   }
   if (mode === 'bluetooth') disconnectBluetooth();
   mode = 'demo';
   resetSmoothing();
-  setStatus('demo', t('statusDemoMode'));
-  $('btn-demo').textContent = t('stopDemoLabel');
+  setStatus('demo', 'demo mode');
+  $('btn-demo').textContent = '⏹ Stop Demo';
 
   const ALL_DEMO_STATES = ['Mudha','Kshipta','Vikshipta','Ekagra','Niruddha'];
   const runDemo = () => {
@@ -1652,7 +1265,6 @@ $('btn-demo').addEventListener('click', () => {
       band_powers:  { relative: bp },
       eeg_spectrum: bp,
       alpha_asymmetry: faa,
-      faa,
       tattva_flags: tattva,
       contemplative_depth: depth,
       gunas,
@@ -1704,12 +1316,13 @@ function updateBattery(pct) {
 }
 
 // Show the HR/SpO2 vitals cards only when the connected driver streams PPG.
-// The HR/SpO2 cards are always visible (index.html — no display:none), even
-// before a headband is ever connected. What's gated on real data is the
-// VALUE inside each card (applyReading below): "—" / "awaiting signal" until
-// a real reading exists, a real number once one does. Kept as a no-op (rather
-// than deleting) so its call sites don't need touching.
-function updateVitalsVisibility(driver) {}
+function updateVitalsVisibility(driver) {
+  const show = !!(driver && driver.hasPPG);
+  for (const id of ['spo2-card', 'hr-card']) {
+    const el = $(id);
+    if (el) el.style.display = show ? '' : 'none';
+  }
+}
 
 // Generic sink: all drivers funnel decoded µV samples through here.
 function pushSamples(ch, samples) {
@@ -1717,18 +1330,11 @@ function pushSamples(ch, samples) {
   bleChannels[ch].push(...samples);
   bleSamTick += samples.length;
 
-  // Each channel is pushed to independently as its own BLE notifications
-  // arrive, so channels don't necessarily fill at the same rate. Gate on the
-  // SLOWEST channel (not just channel 0) — triggering as soon as channel 0
-  // alone reached COLLECT_N let processBluetoothEEG() snapshot the other
-  // channels while they were still short, producing mismatched channel
-  // lengths that the backend correctly rejects with a 400.
-  const minLen = Math.min(...bleChannels.map(c => c.length));
-  const buf = Math.min(minLen, COLLECT_N);
+  const buf = Math.min(bleChannels[0].length, COLLECT_N);
   const bufEl = $('val-buffer');
   if (bufEl) bufEl.textContent = buf + ' / ' + COLLECT_N;
 
-  if (minLen >= COLLECT_N) processBluetoothEEG();
+  if (bleChannels[0].length >= COLLECT_N) processBluetoothEEG();
 }
 
 const MuseDriver = {
@@ -1758,19 +1364,10 @@ const MuseDriver = {
         buf.set(payload, 1);
         return buf;
       };
-      // Preset 21 is EEG-only and never turns the optical (PPG) sensors on —
-      // confirmed against the reference muse-js implementation (urish/muse-js
-      // src/muse.ts): preset 50 is the one that enables EEG + PPG together.
-      // p21 was why heart rate/SpO2 never streamed even though the PPG
-      // characteristics were subscribed below. Also matches muse-js's exact
-      // command sequence: halt -> preset -> 's' -> resume (the 's' write was
-      // previously missing here).
       await controlChar.writeValue(museCmd('h'));    // halt any prior streaming
       await new Promise(r => setTimeout(r, 300));
-      await controlChar.writeValue(museCmd('p50'));  // preset 50 = EEG + PPG
-      await new Promise(r => setTimeout(r, 150));
-      await controlChar.writeValue(museCmd('s'));    // apply preset
-      await new Promise(r => setTimeout(r, 150));
+      await controlChar.writeValue(museCmd('p21'));  // preset 21 = EEG mode
+      await new Promise(r => setTimeout(r, 300));
       await controlChar.writeValue(museCmd('d'));    // start streaming
       await new Promise(r => setTimeout(r, 500));    // let stream initialise before subscribing
     }
@@ -1868,7 +1465,7 @@ const DRIVERS = [MuseDriver, BrainBitDriver];
 
 async function connectBluetooth() {
   if (!navigator.bluetooth) {
-    alert(t('webBluetoothUnavailable'));
+    alert('Web Bluetooth is not available. Please use Chrome or Edge on desktop.');
     return;
   }
   try {
@@ -1884,7 +1481,7 @@ async function connectBluetooth() {
     let server = null;
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
-        setStatus('bluetooth', t('statusConnecting') + ' (' + attempt + '/4)');
+        setStatus('bluetooth', 'connecting… (' + attempt + '/4)');
         server = await device.gatt.connect();
         break;
       } catch (e) {
@@ -1898,7 +1495,7 @@ async function connectBluetooth() {
     for (const d of DRIVERS) {
       if (await d.isMatch(server)) { driver = d; break; }
     }
-    if (!driver) throw new Error(t('noCompatibleDriver'));
+    if (!driver) throw new Error('No compatible EEG driver for this device');
 
     activeDriver = driver;
     activeSampleRate = driver.sampleRate;
@@ -1907,7 +1504,7 @@ async function connectBluetooth() {
     bleChannels.length = 0;
     for (let i = 0; i < driver.channelCount; i++) bleChannels.push([]);
     ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
-    latestHeartRate = null; latestSpO2 = null; resetPpgSmoothing();
+    latestHeartRate = null; latestSpO2 = null;
 
     await driver.start(server, { pushSamples, reportBattery: updateBattery });
 
@@ -1917,7 +1514,7 @@ async function connectBluetooth() {
     if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
     mode = 'bluetooth';
     resetSmoothing();
-    setStatus('bluetooth', driver.name + ' ' + t('statusConnected'));
+    setStatus('bluetooth', driver.name + ' connected');
     $('btn-bluetooth').classList.add('bt-active');
     $('bt-device-name').textContent = device.name || (driver.name + ' device');
     $('bt-device-row').style.display = '';
@@ -1925,7 +1522,7 @@ async function connectBluetooth() {
   } catch (err) {
     if (!err.message?.includes('cancelled')) {
       console.warn('BT connect failed:', err.message);
-      setStatus('error', t('statusBluetoothFailed') + ': ' + err.message);
+      setStatus('error', 'BT failed: ' + err.message);
     }
   }
 }
@@ -1970,10 +1567,6 @@ async function processBluetoothEEG() {
           depth: data.chitta_bhumi?.depth || data.depth || '—',
           confidence: data.chitta_bhumi?.confidence || '—',
           probabilities: data.chitta_bhumi?.probabilities || {},
-          // "WHAT THE SIGNALS SAY" — the backend always sends this, but it was
-          // dropped here, so it only ever showed in Demo mode (hand-authored
-          // DEMO_CORROB fixtures), never on a real headband run.
-          corroboration: data.chitta_bhumi?.corroboration || null,
         },
         swara: {
           state: data.swara?.state || '—',
@@ -1986,7 +1579,6 @@ async function processBluetoothEEG() {
         contemplative_depth: data.chitta_bhumi?.depth || data.depth || '—',
         // Use hemispheric asymmetry from backend if available
         alpha_asymmetry: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? 0,
-        faa: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? null,
         // Backend returns eeg_spectrum or band_relative
         eeg_spectrum: data.eeg_spectrum || data.band_relative || null,
         gunas: data.gunas || null,
@@ -2007,39 +1599,13 @@ async function processBluetoothEEG() {
     }
   }
 
-  // Local FFT fallback — per-channel bands so FAA/PLV/Gunas aren't guesswork.
-  // Previously only channel 0 was used and FAA was `Math.random()`, which made
-  // Swara and every guna/vṛtti figure derived from it meaningless noise.
-  const chBp = [];
-  for (let c = 0; c < snapshot.length; c++) {
-    const sig = snapshot[c] || [];
-    if (sig.length < 64) continue;
-    const sz = Math.pow(2, Math.floor(Math.log2(sig.length)));
-    chBp.push({ ch: c, bp: bandPowers(fft(sig.slice(-sz)), activeSampleRate, sz) });
-  }
-  if (!chBp.length) return;
-
-  // Whole-head average band powers (same convention as the .NET analyser).
-  const bp = {};
-  for (const k of ['delta','theta','alpha','low_beta','high_beta','beta','gamma']) {
-    bp[k] = chBp.reduce((s, x) => s + x.bp[k], 0) / chBp.length;
-  }
-
-  // Left = channels 0,1 (TP9,AF7); Right = channels 2,3 (AF8,TP10) — same
-  // hemisphere assignment as the analyser's FeatureExtractor default indices.
-  const leftCh = chBp.filter(x => x.ch < 2), rightCh = chBp.filter(x => x.ch >= 2);
-  const leftAlpha = leftCh.length ? leftCh.reduce((s,x) => s+x.bp.alpha, 0) / leftCh.length : bp.alpha;
-  const rightAlpha = rightCh.length ? rightCh.reduce((s,x) => s+x.bp.alpha, 0) / rightCh.length : bp.alpha;
-  const faa = Math.max(-2, Math.min(2, Math.log(rightAlpha + 1e-9) - Math.log(leftAlpha + 1e-9)));
-
-  // PLV proxy: |correlation| between a left- and a right-hemisphere channel's raw
-  // signal — not a true Hilbert-phase PLV (that always comes from the analyser),
-  // but a reasonable coherence stand-in for this degraded fallback path.
-  const plv = snapshot.length >= 3
-    ? Math.max(0, Math.min(1, Math.abs(pearsonCorr(snapshot[0], snapshot[2]))))
-    : 0.5;
-
-  const r = classifyLocal(bp, faa, plv);
+  // Local FFT fallback
+  const signal = snapshot[0] || [];
+  if (signal.length < 64) return;
+  const sz = Math.pow(2, Math.floor(Math.log2(signal.length)));
+  const mags = fft(signal.slice(-sz));
+  const bp = bandPowers(mags, activeSampleRate, sz);
+  const r = classifyLocal(bp);
   r.latency_ms = parseFloat((performance.now() - t0).toFixed(1));
   applyReading(smoothReading(r));
   storeEpochToSession(r);
@@ -2056,9 +1622,9 @@ function disconnectBluetooth() {
   if (btRow) btRow.style.display = 'none';
   bleChannels.forEach(ch => { ch.length = 0; });
   ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
-  latestHeartRate = null; latestSpO2 = null; resetPpgSmoothing();
+  latestHeartRate = null; latestSpO2 = null;
   mode = 'idle';
-  setStatus('', t('disconnected'));
+  setStatus('', 'disconnected');
   $('btn-bluetooth').classList.remove('bt-active');
   const bufEl = $('val-buffer');
   if (bufEl) bufEl.textContent = '0 / ' + COLLECT_N;
@@ -2069,39 +1635,6 @@ function onBtDisconnected() {
 }
 
 // ── Muse S PPG processing (heart rate + SpO2) ─────────────────────────────────
-// Forehead PPG (no chest strap, no clip) is inherently noisier than a
-// dedicated pulse oximeter — any head movement, jaw tension, or imperfect
-// skin contact shows up as artifact. That's a real hardware/placement limit
-// we can't fully engineer around. But the previous pipeline made it worse:
-// it recomputed on every single BLE notification (many times/second) from a
-// sliding window with no outlier rejection and no temporal smoothing, so one
-// spurious noise-peak could swing the reading by 50+ BPM between frames. The
-// fixes below (detrend, outlier-reject RR intervals, EMA smoothing, throttled
-// recompute) don't require better hardware — they make the estimate honest
-// about what a noisy signal actually supports.
-let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
-let lastValidHrAt = 0, lastValidSpo2At = 0;
-const PPG_RECOMPUTE_MS = 1000;  // real HR doesn't need updating faster than 1/s
-// If nothing's been confirmed in this long, the number on screen is no
-// longer "live" — but per explicit feedback, don't blank it out either
-// (that read as flicker); keep showing the last known value and just change
-// the status label so it's honest about being a last-known reading, not a
-// fresh one.
-const PPG_STALE_MS = 8000;
-
-function resetPpgSmoothing() {
-  hrEma = null; spo2Ema = null; lastPpgComputeAt = 0;
-  lastValidHrAt = 0; lastValidSpo2At = 0;
-}
-function isHrStale()   { return hrEma == null   || performance.now() - lastValidHrAt   > PPG_STALE_MS; }
-function isSpo2Stale() { return spo2Ema == null || performance.now() - lastValidSpo2At > PPG_STALE_MS; }
-
-// Diagnostic logging for computeHeartRate() internals (peak count, RR
-// intervals, autocorrelation score, and whether the harmonic-doubling
-// correction below fired). Off by default so normal use stays quiet; flip
-// to true here and redeploy if a real-hardware mismatch needs diagnosing.
-const HR_DEBUG = false;
-
 function onMusePPG(ev, channel) {
   const data = ev.target.value;
   // Muse PPG: 2-byte header + 6 samples × 3 bytes uint24 big-endian
@@ -2111,261 +1644,36 @@ function onMusePPG(ev, channel) {
   }
   if (buf.length > PPG_WINDOW_SAMPLES) buf.splice(0, buf.length - PPG_WINDOW_SAMPLES);
 
-  const now = performance.now();
-  if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
-    lastPpgComputeAt = now;
-    const rawHr = HR_DEBUG ? computeHeartRateDebug(ppgBuf.ir) : computeHeartRate(ppgBuf.ir);
-    if (rawHr != null) {
-      hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
-      lastValidHrAt = now;
-    }
-    latestHeartRate = hrEma;
-
-    if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) {
-      const rawSpo2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
-      if (rawSpo2 != null) {
-        spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
-        lastValidSpo2At = now;
-      }
-      latestSpO2 = spo2Ema;
-    }
-
+  if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES) {
+    latestHeartRate = computeHeartRate(ppgBuf.ir);
+    if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) latestSpO2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
     const hrEl = $('val-hr'), spo2El = $('val-spo2');
     const hrSt = $('hr-status'), spo2St = $('spo2-status');
-    if (hrEl)  { hrEl.textContent  = latestHeartRate != null ? localizeNumber(latestHeartRate.toFixed(0)) : '—'; if (hrSt)  hrSt.textContent  = latestHeartRate == null ? t('awaitingSignal') : (isHrStale()   ? t('lastKnownReading') : t('liveReading')); }
-    if (spo2El){ spo2El.textContent = latestSpO2 != null      ? localizeNumber(latestSpO2.toFixed(1))      : '—'; if (spo2St) spo2St.textContent = latestSpO2 == null      ? t('awaitingSignal') : (isSpo2Stale() ? t('lastKnownReading') : t('liveReading')); }
+    if (hrEl && latestHeartRate != null) { hrEl.textContent = latestHeartRate.toFixed(0); if (hrSt) hrSt.textContent = 'live reading'; }
+    if (spo2El && latestSpO2 != null)   { spo2El.textContent = latestSpO2.toFixed(1);   if (spo2St) spo2St.textContent = 'live reading'; }
   }
 }
 
-// Real Muse S captures (via HR_DEBUG logging) showed the dicrotic notch
-// sometimes registering as its own peak strongly enough to survive
-// threshold+refractory detection — not on every cycle (amplitude varies too
-// much cycle-to-cycle for a clean, always-present split), but often enough
-// within an 8s window that the resulting RR-interval list becomes bimodal:
-// a cluster near the true beat-to-beat interval, and a cluster near half of
-// it (beat-to-notch / notch-to-beat). When the notch-driven cluster happens
-// to be the majority (or ties), the plain median vote in computeHeartRate
-// picks the WRONG (fast) cluster, reporting ~2x the true rate. Detect that
-// bimodal ~2x pattern directly and prefer the slower cluster — a real
-// dicrotic notch cannot occur more often than the heartbeat it's part of, so
-// the longer interval is always the physiologically correct one to trust.
-//
-// Tuned and validated against 9 RR sequences captured live from a real
-// device during an actual bad episode (see scratchpad/hr_test/real_data_v5.js):
-// 0 false positives across every accurately-reported window, and an exact
-// fix on the cleanest reproduction (raw 137.1bpm -> corrected 78.4bpm,
-// matching the reference device's ~80bpm). Deliberately conservative — the
-// minimum-cluster-size requirement means it won't catch every messy window
-// (some have extra contaminating outliers, likely missed-beat artifacts,
-// that break a clean 2-cluster split), but it never overrides an
-// already-correct reading.
-function detectHarmonicDoubling(rrs) {
-  if (rrs.length < 6) return null;
-  const sortedAll = [...rrs].sort((a, b) => a - b);
-  const med = sortedAll[Math.floor(sortedAll.length / 2)];
-  // Strip extreme single-interval outliers (e.g. one missed-beat gap) before
-  // clustering — they're unrelated to the notch/beat alternation and would
-  // otherwise contaminate the split search.
-  const cleaned = rrs.filter(rr => rr <= med * 2.0);
-  if (cleaned.length < 6) return null;
-
-  const sorted = [...cleaned].sort((a, b) => a - b);
-  const minN = Math.max(4, Math.ceil(0.35 * cleaned.length));
-  const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
-  const cv = (arr, m) => Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length) / m;
-
-  let best = null;
-  for (let i = minN; i <= sorted.length - minN; i++) {
-    const lowCluster = sorted.slice(0, i), highCluster = sorted.slice(i);
-    const lowMean = mean(lowCluster), highMean = mean(highCluster);
-    const ratio = highMean / lowMean;
-    if (ratio < 1.6 || ratio > 2.4) continue; // not a clean ~2x split
-    const lowCv = cv(lowCluster, lowMean), highCv = cv(highCluster, highMean);
-    if (lowCv > 0.25 || highCv > 0.25) continue; // clusters too noisy to trust
-    const combinedCv = (lowCv * lowCluster.length + highCv * highCluster.length) / (lowCluster.length + highCluster.length);
-    if (!best || combinedCv < best.combinedCv) {
-      best = { period: highMean, lowMean, highMean, lowN: lowCluster.length, highN: highCluster.length, combinedCv };
-    }
-  }
-  return best;
-}
-
-/** BPM from PPG IR: detrend -> smooth -> peak-detect -> outlier-reject RR intervals. */
+/** BPM from PPG IR via threshold peak detection */
 function computeHeartRate(signal) {
-  if (signal.length < PPG_SAMPLE_RATE * 2) return null;
-
-  // Detrend against a ~1s moving-average baseline instead of one global mean
-  // over the whole 8s window — removes slow drift (breathing, slight movement)
-  // that a single mean can't track.
-  const baseWin = PPG_SAMPLE_RATE;
-  const ac = new Array(signal.length);
-  let baseSum = 0;
-  for (let i = 0; i < signal.length; i++) {
-    baseSum += signal[i];
-    if (i >= baseWin) baseSum -= signal[i - baseWin];
-    const baseline = baseSum / Math.min(i + 1, baseWin);
-    ac[i] = signal[i] - baseline;
-  }
-  // Light smoothing to knock down high-frequency noise before peak-picking.
-  const sm = new Array(ac.length);
-  for (let i = 0; i < ac.length; i++) {
-    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
-    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
-  }
-
-  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
+  if (signal.length < 64) return null;
+  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  const ac = signal.map(v => v - mean);
+  const std = Math.sqrt(ac.reduce((s, v) => s + v * v, 0) / ac.length);
   const thr = std * 0.5;
-  // Refractory period between accepted peaks — this app is for meditation,
-  // not sprints, and capping the search window itself (not just the final
-  // result) stops double-counting one true beat as two spurious close peaks.
-  // Widened from 0.4s (max ~150bpm) to ~0.44s (max ~137bpm) after real
-  // device captures showed the dicrotic notch landing 26-32 samples
-  // (400-500ms) after the systolic peak often enough to survive the old,
-  // tighter refractory and get counted as its own beat — re-filtering those
-  // exact captured peak positions with this wider spacing (before any other
-  // correction) took reported rates from ~130-137bpm down to ~63-76bpm
-  // against a true rate of ~78-80bpm, with no measurable cost to correctly
-  // read windows in the same captures (see scratchpad/hr_test/refractory_resim.js).
-  const minDist = Math.round(60 * PPG_SAMPLE_RATE / 137);
+  // 0.28 s refractory → supports up to ~214 BPM (covers athletic/stress range)
+  const minDist = Math.round(PPG_SAMPLE_RATE * 0.28);
   const peaks = []; let lastPeak = -minDist;
-  for (let i = 1; i < sm.length - 1; i++) {
-    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
+  for (let i = 1; i < ac.length - 1; i++) {
+    if (ac[i] > thr && ac[i] > ac[i - 1] && ac[i] > ac[i + 1] && (i - lastPeak) >= minDist) {
       peaks.push(i); lastPeak = i;
     }
   }
-  if (peaks.length < 6) return null; // need >=5 RR intervals before trusting an estimate
-
+  if (peaks.length < 2) return null;
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-
-  // Try the harmonic-doubling correction first — when it fires, a bimodal
-  // ~2x split was found and the slower cluster is trusted over the plain
-  // median vote (see detectHarmonicDoubling for why). Otherwise fall back to
-  // the original median-based outlier rejection.
-  let meanRR;
-  const doubling = detectHarmonicDoubling(rrs);
-  if (doubling) {
-    meanRR = doubling.period;
-  } else {
-    const sortedRr = [...rrs].sort((a, b) => a - b);
-    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
-    // Reject any RR interval more than 25% off the median — one artifact peak
-    // shouldn't be able to swing the whole estimate.
-    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
-    if (kept.length < 4) return null;
-
-    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
-    // Periodicity gate: a real pulse is regularly spaced; a noise-driven false
-    // trigger (e.g. no skin contact) tends to still be irregular even after
-    // outlier-rejection above. Reject if the surviving intervals are still too
-    // scattered (coefficient of variation) rather than reporting a number that
-    // isn't really a heartbeat.
-    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
-    if (rrStd / meanRR > 0.18) return null;
-  }
-
-  // Autocorrelation confirmation — the checks above only verify that the
-  // greedily-picked peak *gaps* are self-consistent, which is weaker than it
-  // looks: once the 0.4s refractory floor forces picks into a narrow band,
-  // pure noise satisfies it too. Confirmed empirically (synthetic white-noise
-  // PPG windows, no pulse at all): the pre-fix version reported a confident
-  // ~120-137 BPM on essentially every trial, because noise has so many local
-  // maxima that the refractory spacing alone quantizes them into a
-  // deceptively regular ~26-32-sample rhythm. Confirm the candidate period
-  // actually corresponds to periodic energy in the signal itself via
-  // normalized autocorrelation at lag = meanRR — a real pulse train has
-  // strong self-similarity one period later; noise doesn't, regardless of
-  // how its greedily-detected peaks happen to space out. (0.45 threshold:
-  // 0/100 false positives on synthetic noise, 100% accurate on synthetic
-  // clean pulses 45-115bpm and on dicrotic-notch-heavy pulses, while still
-  // correctly returning null rather than a fabricated number when the pulse
-  // is too weak relative to noise to trust — see scratchpad/hr_test/.)
-  const lag = Math.round(meanRR);
-  if (lag < 1 || lag >= sm.length) return null;
-  let acNum = 0, acDen = 0;
-  for (let i = 0; i + lag < sm.length; i++) {
-    acNum += sm[i] * sm[i + lag];
-    acDen += sm[i] * sm[i];
-  }
-  if (acDen <= 0 || acNum / acDen < 0.45) return null;
-
+  const meanRR = rrs.reduce((a, b) => a + b, 0) / rrs.length;
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
-  return (hr >= 35 && hr <= 160) ? hr : null;
-}
-
-/** Verbatim copy of computeHeartRate() with console.log diagnostics at every
- * stage/rejection point — TEMPORARY, for chasing a real-device mismatch that
- * synthetic test signals haven't reproduced. Remove once resolved. */
-function computeHeartRateDebug(signal) {
-  const tag = '[HR]';
-  if (signal.length < PPG_SAMPLE_RATE * 2) { console.log(tag, 'too short:', signal.length); return null; }
-
-  const baseWin = PPG_SAMPLE_RATE;
-  const ac = new Array(signal.length);
-  let baseSum = 0;
-  for (let i = 0; i < signal.length; i++) {
-    baseSum += signal[i];
-    if (i >= baseWin) baseSum -= signal[i - baseWin];
-    const baseline = baseSum / Math.min(i + 1, baseWin);
-    ac[i] = signal[i] - baseline;
-  }
-  const sm = new Array(ac.length);
-  for (let i = 0; i < ac.length; i++) {
-    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
-    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
-  }
-
-  const rawMin = Math.min(...signal), rawMax = Math.max(...signal);
-  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
-  console.log(tag, `rawRange=[${rawMin},${rawMax}] detrendedStd=${std.toFixed(1)}`);
-
-  const thr = std * 0.5;
-  const minDist = Math.round(60 * PPG_SAMPLE_RATE / 137);
-  const peaks = []; let lastPeak = -minDist;
-  for (let i = 1; i < sm.length - 1; i++) {
-    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
-      peaks.push(i); lastPeak = i;
-    }
-  }
-  console.log(tag, `peaks=${peaks.length} positions=[${peaks.join(',')}] heights=[${peaks.map(p => sm[p].toFixed(0)).join(',')}]`);
-  if (peaks.length < 6) { console.log(tag, 'REJECT: too few peaks'); return null; }
-
-  const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  console.log(tag, `rrs(samples)=[${rrs.join(',')}]`);
-
-  let meanRR;
-  const doubling = detectHarmonicDoubling(rrs);
-  if (doubling) {
-    meanRR = doubling.period;
-    console.log(tag, `HARMONIC-DOUBLING CORRECTION: lowMean=${doubling.lowMean.toFixed(1)}(n=${doubling.lowN}) highMean=${doubling.highMean.toFixed(1)}(n=${doubling.highN}) -> using period=${meanRR.toFixed(2)} instead of median vote`);
-  } else {
-    const sortedRr = [...rrs].sort((a, b) => a - b);
-    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
-    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
-    console.log(tag, `median=${medianRr} kept=[${kept.join(',')}]`);
-    if (kept.length < 4) { console.log(tag, 'REJECT: too few kept RRs'); return null; }
-
-    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
-    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
-    const cv = rrStd / meanRR;
-    console.log(tag, `meanRR=${meanRR.toFixed(2)}samples cv=${cv.toFixed(3)} -> naiveHr=${(60 * PPG_SAMPLE_RATE / meanRR).toFixed(1)}`);
-    if (cv > 0.18) { console.log(tag, 'REJECT: cv too high'); return null; }
-  }
-
-  const lag = Math.round(meanRR);
-  if (lag < 1 || lag >= sm.length) { console.log(tag, 'REJECT: bad lag', lag); return null; }
-  let acNum = 0, acDen = 0;
-  for (let i = 0; i + lag < sm.length; i++) {
-    acNum += sm[i] * sm[i + lag];
-    acDen += sm[i] * sm[i];
-  }
-  const acScore = acDen > 0 ? acNum / acDen : 0;
-  console.log(tag, `autocorrelation@lag${lag}=${acScore.toFixed(3)} (threshold 0.45)`);
-  if (acDen <= 0 || acScore < 0.45) { console.log(tag, 'REJECT: autocorrelation too low'); return null; }
-
-  const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
-  const finalHr = (hr >= 35 && hr <= 160) ? hr : null;
-  console.log(tag, `RESULT: ${finalHr == null ? 'null (out of range ' + hr.toFixed(1) + ')' : finalHr.toFixed(1) + ' bpm'}`);
-  return finalHr;
+  return (hr >= 30 && hr <= 200) ? hr : null;
 }
 
 /** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
@@ -2392,23 +1700,23 @@ async function pingBackendStatus(url) {
       const data = await res.json();
       const boardEl = $('val-board');
       const modeEl = $('val-mode');
-      if (boardEl) boardEl.textContent = t('renderBackendLabel');
-      if (modeEl) modeEl.textContent = data.model_ready ? t('statusReady') : t('statusLoadingModelDots');
+      if (boardEl) boardEl.textContent = 'Render backend';
+      if (modeEl) modeEl.textContent = data.model_ready ? 'ready' : 'loading model…';
     }
   } catch {
     const boardEl = $('val-board');
-    if (boardEl) boardEl.textContent = t('statusBackendWaking');
+    if (boardEl) boardEl.textContent = 'backend waking…';
   }
 }
 
 async function connectBackendUrl(url) {
   if (backendPollTimer) { clearInterval(backendPollTimer); backendPollTimer = null; }
   mode = 'backend';
-  setStatus('waking', t('statusWakingUp'));
+  setStatus('waking', 'waking up…');
   const boardEl = $('val-board');
   const modeEl = $('val-mode');
-  if (boardEl) boardEl.textContent = t('renderBackendLabel');
-  if (modeEl) modeEl.textContent = t('modeBleRender');
+  if (boardEl) boardEl.textContent = 'Render backend';
+  if (modeEl) modeEl.textContent = 'BLE → Render';
 
   let attempts = 0;
   const MAX = 40;
@@ -2423,18 +1731,18 @@ async function connectBackendUrl(url) {
         if (data.model_ready) {
           modelConfirmedReady = true;
           clearInterval(backendPollTimer); backendPollTimer = null;
-          setStatus('connected', t('statusBackendReady'));
+          setStatus('connected', 'backend ready');
         } else {
-          setStatus('waking', t('statusModelLoading'));
+          setStatus('waking', 'model loading…');
         }
       } else {
-        setStatus('waking', t('statusWakingUp'));
+        setStatus('waking', 'waking up…');
       }
     } catch {
       if (attempts >= MAX) {
         modelConfirmedReady = true; // stop retrying
         clearInterval(backendPollTimer); backendPollTimer = null;
-        setStatus('error', t('statusBackendOffline'));
+        setStatus('error', 'backend offline');
       }
     }
   };
@@ -2453,9 +1761,9 @@ function stopAll() {
   if (sseSource) { sseSource.close(); sseSource = null; }
   if (mode === 'bluetooth') disconnectBluetooth();
   mode = 'idle';
-  setStatus('', t('disconnected'));
+  setStatus('', 'disconnected');
   const demoBtn = $('btn-demo');
-  if (demoBtn) demoBtn.textContent = t('demoLabel');
+  if (demoBtn) demoBtn.textContent = '▶ Demo';
 }
 
 // ── Canvas / waveform ─────────────────────────────────────────────────────────
@@ -2479,34 +1787,16 @@ function drawWave() {
   const cy = H / 2; // vertical centre of canvas
 
   if (mode === 'bluetooth' && bleSamTick > 0) {
-    // ── Live BLE: draw EEG samples, lightly smoothed for display only ──────
-    // Raw per-sample EEG at 256 Hz plotted point-to-point is visually chaotic
-    // (blink/muscle artifacts alone can dwarf the underlying rhythm) even
-    // when the signal itself is fine. This is a display-only trailing
-    // moving-average + soft amplitude cap — bleChannels (what actually gets
-    // analysed) is read here but never mutated, so classification accuracy
-    // is unaffected.
+    // ── Live BLE: draw raw EEG samples ──────────────────────────────────
     const ch0 = bleChannels[0];
     const len = Math.min(ch0.length, WAVE_LEN);
     if (len > 1) {
-      const raw = ch0.slice(ch0.length - len);
-      const win = 6;
-      const smoothed = new Array(len);
-      let sum = 0;
-      for (let i = 0; i < len; i++) {
-        sum += raw[i];
-        if (i >= win) sum -= raw[i - win];
-        smoothed[i] = sum / Math.min(i + 1, win);
-      }
-      const cap = H * 0.42; // keep artifact spikes on-canvas instead of jumping off it
       ctx.beginPath();
       ctx.strokeStyle = 'var(--accent, #56A67A)';
       ctx.lineWidth = 2;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
       for (let i = 0; i < len; i++) {
         const x = (i / (len - 1)) * W;
-        const y = cy - Math.max(-cap, Math.min(cap, smoothed[i] * H * 400));
+        const y = cy - ch0[ch0.length - len + i] * H * 400;
         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -2559,7 +1849,7 @@ function renderInnerTexture(r) {
   // Vṛtti — mental activity, 0 (still / nirodha) → 100 (scattered).
   setTextureBar('vritti', r.vritti_index != null ? r.vritti_index * 100 : null);
   const nir = $('nirodha-state');
-  if (nir) nir.textContent = r.nirodha_state ? translateNirodha(r.nirodha_state) : '—';
+  if (nir) nir.textContent = r.nirodha_state || '—';
 
   // Mind Richness — roll the four complexity metrics into one gauge.
   const cx = r.complexity;
@@ -2588,7 +1878,19 @@ function renderInnerTexture(r) {
 // it. No backend jargon reaches the screen — axis keys map to lay names, the
 // `agrees` flag becomes a ✓ / ~ / – marker, and a divergence shows an honest
 // caveat rather than being hidden. Mirrors the backend `corroborate` output.
-// Translated via t('axis_' + key) / t('concord_' + key) — see i18n.js.
+const CORROB_LAY_AXIS = {
+  neural_complexity:    'Mind richness',
+  cortical_quietude:    'Background stillness',
+  mental_chatter:       'Mental chatter',
+  absorption_signature: 'Focus',
+  effortlessness:       'Effortlessness',
+};
+const CORROB_CONCORD = {
+  corroborated: 'Signals agree',
+  mixed:        'Mixed signals',
+  tension:      'Signals in tension',
+  inconclusive: 'Inconclusive',
+};
 
 function corrTone(agrees)  { return agrees === true ? 'support' : agrees === false ? 'tension' : 'neutral'; }
 function corrGlyph(agrees) { return agrees === true ? '✓'       : agrees === false ? '~'       : '–'; }
@@ -2609,105 +1911,36 @@ function renderCorroboration(r) {
     return `<div class="corrob-row">
         <span class="corrob-mark ${tone}">${corrGlyph(a.agrees)}</span>
         <div class="corrob-text">
-          <span class="corrob-name">${escHtml(t('axis_' + a.axis) || a.axis)}</span>
-          <span class="corrob-note">${escHtml(translateCorrobNote(a.note) || '')}</span>
+          <span class="corrob-name">${escHtml(CORROB_LAY_AXIS[a.axis] || a.axis)}</span>
+          <span class="corrob-note">${escHtml(a.note || '')}</span>
         </div>
-        <span class="corrob-reading">${escHtml(translateCorrobReading(chip))}</span>
+        <span class="corrob-reading">${escHtml(chip)}</span>
       </div>`;
   }).join('');
 
-  const tentative = co.indeterminate ? `<span class="corrob-tentative">${escHtml(t('corrobHeldGently'))}</span>` : '';
+  const tentative = co.indeterminate ? '<span class="corrob-tentative">held gently</span>' : '';
   const caveat = co.caveat
-    ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(translateCorrobCaveat(co.caveat))}</span></div>`
+    ? `<div class="corrob-caveat"><span class="corrob-caveat-glyph">~</span><span>${escHtml(co.caveat)}</span></div>`
     : '';
 
   host.innerHTML = `
     <div class="corrob-head">
-      <span class="card-label">${escHtml(t('corrobTitle'))}</span>
-      <span class="corrob-concord ${concordTone}">${escHtml(t('concord_' + co.concord) || co.concord)}</span>
+      <span class="card-label">WHAT THE SIGNALS SAY</span>
+      <span class="corrob-concord ${concordTone}">${escHtml(CORROB_CONCORD[co.concord] || co.concord)}</span>
     </div>
     ${tentative}
     <div class="corrob-rows">${rows}</div>
     ${caveat}`;
 }
 
-function setTextureBar(key, pct, prefix) {
-  const p = prefix || '';
-  const bar = $(p + 'bar-' + key);
-  const val = $(p + 'val-' + key);
+function setTextureBar(key, pct) {
+  const bar = $('bar-' + key);
+  const val = $('val-' + key);
   if (bar) bar.style.width = (pct != null ? Math.round(pct) : 0) + '%';
   if (val) val.textContent = pct != null ? Math.round(pct) + '%' : '—';
 }
 
-// Session-level Inner Texture — same derivation as renderInnerTexture, but
-// driven by the /analytics summary's session averages (an-* ids) rather than
-// a single live epoch. Previously the Analyze view had no Inner Texture card
-// at all, so this was permanently blank regardless of what the analyser sent.
-function renderAnalyzeTexture(s) {
-  setTextureBar('vritti', s.avgVritti != null ? s.avgVritti * 100 : null, 'an-');
-  const nir = $('an-nirodha-state');
-  if (nir) nir.textContent = s.avgVritti != null ? translateNirodha(nirodhaLabel(s.avgVritti)) : '—';
-
-  const cx = s.avgComplexity;
-  let richness = null;
-  if (cx) {
-    const parts = [
-      clamp01(cx.lziv),
-      clamp01(cx.permEntropy),
-      clamp01(cx.sampleEntropy / 1.5),
-      clamp01((cx.higuchiFd - 1) / 1),
-    ];
-    richness = parts.reduce((a, b) => a + b, 0) / parts.length;
-  }
-  setTextureBar('richness', richness != null ? richness * 100 : null, 'an-');
-
-  const ap = s.avgAperiodic;
-  const stillness = (ap && ap.exponent != null) ? clamp01((ap.exponent - 1.0) / (3.5 - 1.0)) : null;
-  setTextureBar('stillness', stillness != null ? stillness * 100 : null, 'an-');
-}
-
-// Session-level Tattva/Chakra Correlates — frequency of each flag across all
-// epochs. Previously the Analyze view had no card and /analytics never
-// aggregated tattva_flags, so this was permanently blank/absent.
-function renderAnalyzeTattva(flags) {
-  const el = $('an-tattva-flags');
-  if (!el) return;
-  el.innerHTML = (flags && flags.length)
-    ? flags.map(f => `<span class="tattva-tag">${escHtml(translateTattvaFlag(f.flag))} <em>(${localizeNumber(f.count)})</em></span>`).join('')
-    : `<span class="tattva-tag muted">${escHtml(t('noneDetected'))}</span>`;
-}
-
 function clamp01(x) { return (x == null || isNaN(x)) ? 0 : Math.max(0, Math.min(1, x)); }
-
-// Chitta-bhumi confidence arrives as a raw 0-1 fraction from smoothReading on
-// every live path (demo/BLE/local-FFT all funnel through it), but as a
-// DB-stored string from Replay — this normalizes either into "NN%" instead of
-// showing a bare decimal like "0.6045".
-function formatConfidencePct(c) {
-  if (c == null || c === '') return null;
-  if (typeof c === 'string' && c.trim().endsWith('%')) return c;
-  const n = typeof c === 'string' ? parseFloat(c) : c;
-  if (isNaN(n)) return String(c);
-  return Math.round((n <= 1 ? n * 100 : n)) + '%';
-}
-
-const DATA_QUALITY_KEYS = {
-  '⏪ replay': 'qualityReplay',
-  '✓ local FFT': 'qualityLocalFft',
-  '✓ demo': 'qualityDemo',
-  '✓ BLE → Render': 'qualityBleRender',
-};
-function translateDataQuality(q) {
-  if (!q) return q;
-  const key = DATA_QUALITY_KEYS[q];
-  return key ? t(key) : q;
-}
-
-const ROLE_KEYS = { user: 'adminRoleUser', 'co-admin': 'adminRoleCoAdmin', admin: 'adminRoleAdmin' };
-function translateRole(role) {
-  const key = ROLE_KEYS[role];
-  return key ? t(key) : role;
-}
 
 // Plain-language band over the vṛtti index — mirrors the backend thresholds.
 function nirodhaLabel(v) {
@@ -2831,16 +2064,13 @@ function smoothReading(r) {
   };
 }
 
-let lastAppliedReading = null;
-
 function applyReading(r) {
-  lastAppliedReading = r; // so switching language can instantly re-render this same reading
   // ── Epoch / quality / latency ──
   const epochEl = $('val-epoch');
   const qualEl = $('val-quality');
   const latEl = $('val-latency');
   if (epochEl) epochEl.textContent = r.epoch ?? epoch;
-  if (qualEl) qualEl.textContent = translateDataQuality(r.data_quality) || '—';
+  if (qualEl) qualEl.textContent = r.data_quality || '—';
   if (latEl) latEl.textContent = r.latency_ms != null ? r.latency_ms.toFixed(1) : '—';
 
   // ── Chitta Bhumi ──
@@ -2848,8 +2078,8 @@ function applyReading(r) {
   const state = ch.state || '—';
   const chittaEl = $('chitta-state');
   const chittaSubEl = $('chitta-sub');
-  if (chittaEl) chittaEl.textContent = translateState(state);
-  if (chittaSubEl) chittaSubEl.textContent = (ch.depth ? translateDepth(ch.depth) : null) || formatConfidencePct(ch.confidence) || '—';
+  if (chittaEl) chittaEl.textContent = state;
+  if (chittaSubEl) chittaSubEl.textContent = ch.depth || ch.confidence || '—';
 
   const depth = ch.depth || CHITTA_DEPTHS[state] || 'Surface';
   const depthPct = DEPTH_PCT[depth] ?? 12;
@@ -2865,8 +2095,8 @@ function applyReading(r) {
 
   const confEl = $('val-confidence');
   const depthEl = $('val-depth');
-  if (confEl) confEl.textContent = formatConfidencePct(ch.confidence);
-  if (depthEl) depthEl.textContent = translateDepth(depth);
+  if (confEl) confEl.textContent = ch.confidence || '—';
+  if (depthEl) depthEl.textContent = depth;
 
   const probs = ch.probabilities || {};
   // All 5 Chitta Bhumis (v2 adds Mudha)
@@ -2889,12 +2119,8 @@ function applyReading(r) {
 
   const swaraNote = $('swara-note');
   const swaraConf = $('swara-confidence');
-  // In Gujarati, prefer the translated fallback note over the backend's own
-  // (DO-NOT-TOUCH, English-only) note text — a frontend rendering choice
-  // only, nothing about how the backend classifies Swara changes.
-  const swaraFallback = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
-  if (swaraNote) swaraNote.textContent = getLang() === 'gu' ? swaraFallback : (sw.note || swaraFallback);
-  if (swaraConf) swaraConf.textContent = sw.confidence ? translateConfidenceWord(sw.confidence) : '—';
+  if (swaraNote) swaraNote.textContent = sw.note || (isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna);
+  if (swaraConf) swaraConf.textContent = sw.confidence || '—';
 
   const glIda = $('glyph-ida');
   const glSus = $('glyph-sushumna');
@@ -2953,8 +2179,8 @@ function applyReading(r) {
   const tattvaEl = $('tattva-flags');
   if (tattvaEl) {
     tattvaEl.innerHTML = flags.length
-      ? flags.map(f => `<span class="tattva-tag">${escHtml(translateTattvaFlag(f))}</span>`).join('')
-      : `<span class="tattva-tag muted">${escHtml(t('noneDetected'))}</span>`;
+      ? flags.map(f => `<span class="tattva-tag">${escHtml(f)}</span>`).join('')
+      : '<span class="tattva-tag muted">None detected</span>';
   }
 
   // ── Trigunas ──
@@ -2973,11 +2199,11 @@ function applyReading(r) {
     : gunas.rajas > gunas.tamas ? 'Rajasic' : gunas.tamas ? 'Tamasic' : '—');
   const gunaDominantEl = $('gunas-dominant');
   const gunaNoteEl = $('gunas-note');
-  if (gunaDominantEl) gunaDominantEl.textContent = translateGunaLabel(gunaLabel) || '—';
+  if (gunaDominantEl) gunaDominantEl.textContent = gunaLabel || '—';
   if (gunaNoteEl) {
-    gunaNoteEl.textContent = gunaLabel === 'Sattvic' ? t('gunaNoteSattvic')
-      : gunaLabel === 'Rajasic' ? t('gunaNoteRajasic')
-      : gunaLabel === 'Tamasic' ? t('gunaNoteTamasic') : '';
+    gunaNoteEl.textContent = gunaLabel === 'Sattvic' ? 'clarity & balance dominant'
+      : gunaLabel === 'Rajasic' ? 'activity & passion dominant'
+      : gunaLabel === 'Tamasic' ? 'inertia & heaviness dominant' : '';
   }
 
   // ── Inner Texture (vṛtti / richness / stillness) ──
@@ -2986,26 +2212,15 @@ function applyReading(r) {
   // ── Signed corroboration folded under the bhūmi ──
   renderCorroboration(r);
 
-  // ── Blood oxygen / heart rate — the card stays visible whenever the device
-  // supports it (see updateVitalsVisibility); only the VALUE reflects whether
-  // a real reading exists yet ("—" / "awaiting signal" until it does). ──
+  // ── Blood oxygen / heart rate (if device supports) ──
   const spo2El = $('val-spo2');
   const hrEl = $('val-hr');
   const spo2StatusEl = $('spo2-status');
   const hrStatusEl = $('hr-status');
-  // In live Bluetooth mode, blood_oxygen/heart_rate reflect the same
-  // hrEma/spo2Ema tracked in onMusePPG — use its staleness state so a
-  // momentary bad window doesn't blank the card (per explicit feedback),
-  // just marks the number as "last known" rather than live. Demo/backend-URL
-  // /replay modes don't populate that PPG-specific state, so they keep the
-  // simpler null-check ("no reading yet" vs "have one").
-  const hrIsBleTracked = mode === 'bluetooth';
   if (spo2El) spo2El.textContent = r.blood_oxygen != null ? r.blood_oxygen.toFixed(1) : '—';
   if (hrEl) hrEl.textContent = r.heart_rate != null ? r.heart_rate.toFixed(0) : '—';
-  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen == null ? t('awaitingSignal') : (hrIsBleTracked && isSpo2Stale() ? t('lastKnownReading') : t('liveReading'));
-  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate == null ? t('awaitingSignal') : (hrIsBleTracked && isHrStale() ? t('lastKnownReading') : t('liveReading'));
-
-  localizeDom(document.querySelector('.dashboard-grid'));
+  if (spo2StatusEl) spo2StatusEl.textContent = r.blood_oxygen != null ? 'live reading' : 'awaiting signal';
+  if (hrStatusEl) hrStatusEl.textContent = r.heart_rate != null ? 'live reading' : 'awaiting signal';
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -3068,15 +2283,15 @@ async function openAiBaba() {
         const time = s.start_time ? new Date(s.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '';
         const dur  = s.duration_seconds ? `${Math.floor(s.duration_seconds / 60)}m ${s.duration_seconds % 60}s` : '—';
         const epochs = s.epoch_count || 0, hasData = epochs > 0;
-        return `<div class="ai-baba-session-item" data-id="${escHtml(String(s.id))}" data-name="${escHtml(s.name || t('aiBabaSessionFallbackName'))}"
+        return `<div class="ai-baba-session-item" data-id="${escHtml(String(s.id))}" data-name="${escHtml(s.name || 'Session')}"
                      ${!hasData ? 'style="opacity:0.5;pointer-events:none" aria-disabled="true"' : 'tabindex="0" role="button"'}>
-          <div class="ai-baba-session-item-name">${escHtml(s.name || t('untitledSession'))}</div>
+          <div class="ai-baba-session-item-name">${escHtml(s.name || 'Untitled Session')}</div>
           <div class="ai-baba-session-item-meta">
             <span>${escHtml(date)}${time ? ' · ' + escHtml(time) : ''}</span>
             <span>${escHtml(dur)}</span>
-            <span>${localizeNumber(epochs)} ${epochs !== 1 ? t('aiBabaEpochPlural') : t('aiBabaEpochSingular')}</span>
+            <span>${epochs} epoch${epochs !== 1 ? 's' : ''}</span>
           </div>
-          ${!hasData ? `<div class="ai-baba-session-item-nodata">${escHtml(t('noEegDataRecorded'))}</div>` : ''}
+          ${!hasData ? '<div class="ai-baba-session-item-nodata">No EEG data recorded</div>' : ''}
         </div>`;
       }).join('');
       listEl.style.display = '';
@@ -3084,12 +2299,11 @@ async function openAiBaba() {
         item.addEventListener('click', () => aiBabaSelectSession(item.dataset.id, item.dataset.name));
         item.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aiBabaSelectSession(item.dataset.id, item.dataset.name); } });
       });
-      localizeDom(listEl);
     }
   } catch (err) {
     if (loadingEl) loadingEl.style.display = 'none';
     if (emptyEl) {
-      emptyEl.textContent = t('aiBabaFailedToLoadSessions') + (err.message || t('aiBabaUnknownErrorLower')) + t('aiBabaPleaseTryAgainSuffix');
+      emptyEl.textContent = 'Failed to load sessions — ' + (err.message || 'unknown error') + '. Please try again.';
       emptyEl.style.display = '';
     }
   }
@@ -3101,18 +2315,18 @@ async function aiBabaSelectSession(sessionId, sessionName) {
   const label = $('ai-baba-session-label'); if (label) label.textContent = sessionName;
   aiBabaShowStep('loading');
   try {
-    const data = await api('POST', '/ai/start', { session_id: sessionId, lang: getLang() });
+    const data = await api('POST', '/ai/start', { session_id: sessionId });
     aiBabaShowStep('chat');
-    const summary = data.summary || t('aiBabaDefaultSummary');
+    const summary = data.summary || 'Here is a summary of your session.';
     aiBabaAddMessage('assistant', summary);
     aiBabaChatHistory.push({ role: 'assistant', content: summary });
     setTimeout(() => { const inp = $('ai-baba-input'); if (inp) inp.focus(); }, 100);
   } catch (err) {
     aiBabaShowStep('chat');
     aiBabaAddMessage('assistant',
-      t('aiBabaTroubleLoading') + '\n\n' +
-      t('aiBabaErrorPrefix') + (err.message || t('unknownErrorLabel')) + '\n\n' +
-      t('aiBabaTryAgainDifferent'), true);
+      'Namaste 🙏 I had trouble loading your session data.\n\n' +
+      '⚠️ Error: ' + (err.message || 'Unknown error') + '\n\n' +
+      'Please try again or select a different session.', true);
   }
 }
 
@@ -3126,14 +2340,14 @@ async function aiBabaSendMessage() {
   aiBabaSetTyping(true);
   const msgs = $('ai-baba-messages'); if (msgs) msgs.scrollTop = msgs.scrollHeight;
   try {
-    const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20), lang: getLang() });
+    const data = await api('POST', '/ai/chat', { session_id: aiBabaSessionId, message: text, history: aiBabaChatHistory.slice(-20) });
     aiBabaSetTyping(false);
-    const reply = data.reply || t('aiBabaCouldNotProcess');
+    const reply = data.reply || 'I could not process that. Please try again.';
     aiBabaAddMessage('assistant', reply);
     aiBabaChatHistory.push({ role: 'assistant', content: reply });
   } catch (err) {
     aiBabaSetTyping(false);
-    aiBabaAddMessage('assistant', t('aiBabaSomethingWentWrong') + (err.message || t('aiBabaUnknownErrorLower')) + t('aiBabaPleaseTryAgainSuffix'), true);
+    aiBabaAddMessage('assistant', 'Something went wrong — ' + (err.message || 'unknown error') + '. Please try again.', true);
   }
   aiBabaSending = false;
 }
@@ -3175,7 +2389,6 @@ function closeAiBaba() {
 // states for missing data.
 // ════════════════════════════════════════════════════════════════════════════
 const AN_BAND_COLORS  = { delta:'#9B6FBE', theta:'#5B8DB8', alpha:'#56A67A', beta:'#D4973A', gamma:'#C75C5C' };
-const BAND_NAME_KEYS  = { delta:'bandDelta', theta:'bandTheta', alpha:'bandAlpha', beta:'bandBeta', gamma:'bandGamma' };
 const AN_GUNA_COLORS  = { sattva:'#C9A84C', rajas:'#C75C5C', tamas:'#5A6DAA' };
 const AN_BHUMI_COLORS = { Mudha:'#8A8F98', Kshipta:'#E08030', Vikshipta:'#D97757', Ekagra:'#5B8DB8', Niruddha:'#7C68A8' };
 const AN_SWARA_COLORS = { ida:'#5B8DB8', pingala:'#D97757', sushumna:'#56A67A' };
@@ -3205,7 +2418,7 @@ async function onShowAnalyze() {
   if (!picker) return;
   try {
     const sessions = await api('GET', '/sessions/mine');
-    if (!sessions.length) { picker.innerHTML = `<option value="">${escHtml(t('noSessionsOption'))}</option>`; anSetEmpty(t('recordSessionFirstHint')); return; }
+    if (!sessions.length) { picker.innerHTML = '<option value="">No sessions</option>'; anSetEmpty('Record a session first, then analyze it here.'); return; }
     picker.innerHTML = sessions.map(s =>
       `<option value="${s.id}">${escHtml(s.name)} — ${new Date(s.startTime).toLocaleDateString()}</option>`).join('');
     const preferred = analyzeSessionId
@@ -3215,7 +2428,7 @@ async function onShowAnalyze() {
     picker.onchange = () => loadAnalyzeSession(picker.value);
     await loadAnalyzeSession(picker.value);
   } catch (err) {
-    anSetEmpty(t('couldNotLoadSessions') + err.message);
+    anSetEmpty('Could not load sessions: ' + err.message);
   }
 }
 
@@ -3224,27 +2437,21 @@ async function loadAnalyzeSession(id) {
   if (!id) return;
   try {
     const a = await api('GET', '/sessions/' + id + '/analytics');
-    if (!a.summary || !a.summary.totalEpochs) { anSetEmpty(t('noEpochDataToAnalyze')); return; }
+    if (!a.summary || !a.summary.totalEpochs) { anSetEmpty('This session has no epoch data to analyze.'); return; }
     const eps = await api('GET', '/sessions/' + id + '/epochs').catch(() => []);
     const s = a.summary;
     $('analyze-empty').style.display = 'none';
     $('analyze-body').style.display = '';
-    $('analyze-session-meta').textContent = tf('analyzeSessionMetaTemplate', {
-      epochs: localizeNumber(s.totalEpochs),
-      duration: formatDuration(s.durationSeconds || 0),
-      dominant: s.dominantState ? translateState(s.dominantState) : '—',
-    });
+    $('analyze-session-meta').textContent =
+      `${s.totalEpochs} epochs · ${formatDuration(s.durationSeconds || 0)} · dominant: ${s.dominantState || '—'}`;
     drawBandRadar(s.avgBands || {});
     drawGunaTriangle(s.avgGunas || {});
     drawBhumiRing(s.stateCounts || {});
     drawSwaraGauge(s.swaraCounts || {});
     drawDepthMeter(eps, s);
     drawSensorSchematic(s.avgBands || {});
-    renderAnalyzeTexture(s);
-    renderAnalyzeTattva(s.tattvaFlags || []);
-    localizeDom(document.querySelector('.analyze'));
   } catch (err) {
-    anSetEmpty(t('couldNotLoadAnalytics') + err.message);
+    anSetEmpty('Could not load analytics: ' + err.message);
   }
 }
 
@@ -3260,7 +2467,7 @@ function drawBandRadar(avgBands) {
     const [ax, ay] = anPol(0, 0, maxR, ang(i));
     svg += `<line x1="0" y1="0" x2="${ax.toFixed(1)}" y2="${ay.toFixed(1)}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>`;
     const [lx, ly] = anPol(0, 0, maxR + 17, ang(i));
-    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${escHtml(t(BAND_NAME_KEYS[b]))}</text>`;
+    svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="${AN_BAND_COLORS[b]}" font-size="11" font-weight="600" text-anchor="middle" dominant-baseline="middle">${b}</text>`;
   });
   const dpts = bands.map((b, i) => anPol(0, 0, maxR * Math.max(0, Math.min(1, anNum(avgBands[b]))), ang(i)).map(v => v.toFixed(1)).join(',')).join(' ');
   svg += `<polygon points="${dpts}" fill="var(--accent)" fill-opacity="0.28" stroke="var(--accent)" stroke-width="2"/>`;
@@ -3277,15 +2484,15 @@ function drawGunaTriangle(g) {
   for (const k of ['sattva', 'rajas', 'tamas']) {
     const [vx, vy] = V[k], lx = vx * 1.16, ly = vy === -90 ? vy - 9 : vy + 18;
     svg += `<circle cx="${vx}" cy="${vy}" r="4" fill="${AN_GUNA_COLORS[k]}"/>`;
-    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${escHtml(t(k))}</text>`;
+    svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${k}</text>`;
   }
-  const s = anNum(g.sattva), r = anNum(g.rajas), tm = anNum(g.tamas), sum = s + r + tm;
+  const s = anNum(g.sattva), r = anNum(g.rajas), t = anNum(g.tamas), sum = s + r + t;
   if (sum > 0) {
-    const px = (s * V.sattva[0] + r * V.rajas[0] + tm * V.tamas[0]) / sum;
-    const py = (s * V.sattva[1] + r * V.rajas[1] + tm * V.tamas[1]) / sum;
+    const px = (s * V.sattva[0] + r * V.rajas[0] + t * V.tamas[0]) / sum;
+    const py = (s * V.sattva[1] + r * V.rajas[1] + t * V.tamas[1]) / sum;
     svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="1.5"/>`;
   } else {
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">${escHtml(t('noGunaData'))}</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">no guṇa data</text>`;
   }
   $('an-guna-tri').innerHTML = svg;
 }
@@ -3298,23 +2505,23 @@ function drawBhumiRing(counts) {
   let svg = '';
   if (!sum) {
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="var(--bg-card-2)" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">${escHtml(t('noDataLower'))}</text>`;
+    svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="12" text-anchor="middle" dominant-baseline="middle">no data</text>`;
   } else if (entries.length === 1) {
     const [k] = entries[0];
     svg += `<circle cx="0" cy="0" r="${(rO + rI) / 2}" fill="none" stroke="${AN_BHUMI_COLORS[k] || 'var(--accent)'}" stroke-width="${rO - rI}"/>`;
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(translateState(k))}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${localizeNumber(100)}%</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(k)}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">100%</text>`;
   } else {
     let a0 = -90;
     entries.forEach(([k, c]) => {
       const sweep = c / sum * 360, a1 = a0 + sweep, col = AN_BHUMI_COLORS[k] || 'var(--text-muted)';
       svg += `<path d="${anArcSeg(0, 0, rO, rI, a0, a1)}" fill="${col}"/>`;
-      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${localizeNumber(Math.round(c / sum * 100))}%</text>`; }
+      if (sweep > 26) { const [lx, ly] = anPol(0, 0, (rO + rI) / 2, (a0 + a1) / 2); svg += `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" dominant-baseline="middle">${Math.round(c / sum * 100)}%</text>`; }
       a0 = a1;
     });
     const dom = entries.slice().sort((a, b) => b[1] - a[1])[0][0];
-    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(translateState(dom))}</text>`;
-    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">${escHtml(t('dominantSuffix'))}</text>`;
+    svg += `<text x="0" y="-4" fill="var(--text)" font-size="13" font-weight="700" text-anchor="middle">${escHtml(dom)}</text>`;
+    svg += `<text x="0" y="14" fill="var(--text-muted)" font-size="10" text-anchor="middle">dominant</text>`;
   }
   $('an-bhumi-ring').innerHTML = svg;
 }
@@ -3325,7 +2532,7 @@ function drawSwaraGauge(counts) {
   let svg = '';
   if (!sum) {
     svg += `<path d="${anArcSeg(cx, cy, r, rI, 180, 360)}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">${escHtml(t('noSvaraData'))}</text>`;
+    svg += `<text x="${cx}" y="${cy - 20}" fill="var(--text-muted)" font-size="12" text-anchor="middle">no svara data</text>`;
   } else {
     let a0 = 180;
     order.forEach(k => { const frac = anNum(counts[k]) / sum; if (frac <= 0) return; const a1 = a0 + frac * 180; svg += `<path d="${anArcSeg(cx, cy, r, rI, a0, a1)}" fill="${AN_SWARA_COLORS[k]}"/>`; a0 = a1; });
@@ -3337,7 +2544,7 @@ function drawSwaraGauge(counts) {
   const lx = [24, 108, 188];
   order.forEach((k, i) => {
     svg += `<circle cx="${lx[i]}" cy="118" r="4" fill="${AN_SWARA_COLORS[k]}"/>`;
-    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${escHtml(translateSwaraNadi(capitalize(k)))} ${localizeNumber(anNum(counts[k]))}</text>`;
+    svg += `<text x="${lx[i] + 9}" y="122" fill="var(--text-muted)" font-size="10">${k} ${anNum(counts[k])}</text>`;
   });
   $('an-swara-gauge').innerHTML = svg;
 }
@@ -3353,14 +2560,14 @@ function drawDepthMeter(eps, summary) {
     AN_DEPTH_ORDER.forEach(d => { const segW = counts[d] / n * w; if (segW > 0) { svg += `<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="${h}" fill="${AN_DEPTH_COLORS[d]}"/>`; x += segW; } });
   } else {
     svg += `<rect x="${x0}" y="${y}" width="${w}" height="${h}" fill="var(--bg-card-2)"/>`;
-    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">${escHtml(t('noDepthData'))}</text>`;
+    svg += `<text x="120" y="${y + h / 2 + 4}" fill="var(--text-muted)" font-size="11" text-anchor="middle">no depth data</text>`;
   }
-  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(dp => { const tx = x0 + (DEPTH_PCT[dp] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${escHtml(translateDepth(dp))}</text>`; });
+  ['Surface', 'Emerging', 'Deep', 'Profound'].forEach(t => { const tx = x0 + (DEPTH_PCT[t] / 100) * w; svg += `<text x="${tx.toFixed(1)}" y="${y + h + 16}" fill="var(--text-muted)" font-size="9" text-anchor="middle">${t}</text>`; });
   const domDepth = CHITTA_DEPTHS[summary.dominantState];
   if (domDepth && DEPTH_PCT[domDepth] != null) {
     const mx = x0 + (DEPTH_PCT[domDepth] / 100) * w;
     svg += `<polygon points="${mx.toFixed(1)},${y - 5} ${(mx - 5).toFixed(1)},${y - 13} ${(mx + 5).toFixed(1)},${y - 13}" fill="var(--text)"/>`;
-    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${escHtml(translateDepth(domDepth))}</text>`;
+    svg += `<text x="${mx.toFixed(1)}" y="${y - 17}" fill="var(--text)" font-size="9" font-weight="600" text-anchor="middle">${escHtml(domDepth)}</text>`;
   }
   $('an-depth-meter').innerHTML = svg;
 }
@@ -3377,7 +2584,7 @@ function drawSensorSchematic(avgBands) {
     svg += `<circle cx="${dx}" cy="${dy}" r="9" fill="${col}" fill-opacity="0.55" stroke="${col}" stroke-width="2"/>`;
     svg += `<text x="${dx}" y="${dy + 3}" fill="var(--text)" font-size="8" font-weight="700" text-anchor="middle">${lbl}</text>`;
   });
-  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? escHtml(tf('bandDominantTemplate', { band: t(BAND_NAME_KEYS[dom]) })) : escHtml(t('noBandData'))}</text>`;
+  svg += `<text x="0" y="4" fill="${col}" font-size="10" font-weight="600" text-anchor="middle">${max >= 0 ? dom + ' dominant' : 'no band data'}</text>`;
   $('an-sensor').innerHTML = svg;
 }
 
@@ -3388,10 +2595,10 @@ function drawSensorSchematic(avgBands) {
 let selectedClientId = null;
 
 const CLIENT_STATUS = {
-  plateau:  { get label() { return t('clientStatusPlateau'); }, cls: 'status--plateau' },
-  progress: { get label() { return t('clientStatusProgress'); }, cls: 'status--progress' },
-  issue:    { get label() { return t('clientStatusIssue'); },    cls: 'status--issue' },
-  new:      { get label() { return t('clientStatusNew'); },      cls: 'status--new' },
+  plateau:  { label: 'Plateau',         cls: 'status--plateau' },
+  progress: { label: 'Progress',        cls: 'status--progress' },
+  issue:    { label: 'Needs attention', cls: 'status--issue' },
+  new:      { label: 'New',             cls: 'status--new' },
 };
 
 function monthsSince(iso) {
@@ -3399,9 +2606,9 @@ function monthsSince(iso) {
   const then = new Date(iso), now = new Date();
   let m = (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
   m = Math.max(0, m);
-  if (m < 1) return t('monthsPracticingLt1');
-  if (m < 12) return tf('monthsPracticing', { m, s: m === 1 ? '' : 's' });
-  return tf('yearsMonthsPracticing', { y: Math.floor(m / 12), m: m % 12 });
+  if (m < 1) return '<1 month practicing';
+  if (m < 12) return `${m} month${m === 1 ? '' : 's'} practicing`;
+  return `${Math.floor(m / 12)}y ${m % 12}m practicing`;
 }
 function isAttention(c) {
   if (c.status === 'issue' || c.status === 'plateau') return true;
@@ -3434,29 +2641,29 @@ function renderHomeKpis(clients, sessions) {
   const weekAgo = Date.now() - 7 * 864e5;
   const thisWeek = sessions.filter(s => new Date(s.startTime).getTime() >= weekAgo).length;
   const cells = [
-    [t('kpiClients'), clients.length],
-    [t('kpiSessionsThisWeek'), thisWeek],
-    [t('kpiNeedsAttention'), clients.filter(isAttention).length],
-    [t('kpiTotalSessions'), sessions.length],
+    ['Clients', clients.length],
+    ['Sessions this week', thisWeek],
+    ['Needs attention', clients.filter(isAttention).length],
+    ['Total sessions', sessions.length],
   ];
   $('home-kpis').innerHTML = cells.map(([k, v]) =>
-    `<div class="kpi"><span class="kpi__value">${localizeNumber(v)}</span><span class="kpi__label">${k}</span></div>`).join('');
+    `<div class="kpi"><span class="kpi__value">${v}</span><span class="kpi__label">${k}</span></div>`).join('');
 }
 function renderHomeAttention(clients) {
   const el = $('home-attention'), flagged = clients.filter(isAttention);
-  if (!flagged.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('allClientsOnTrack'))}</div>`; return; }
+  if (!flagged.length) { el.innerHTML = '<div class="empty-state">All clients on track.</div>'; return; }
   el.innerHTML = flagged.map(c => {
     const st = CLIENT_STATUS[c.status];
-    const reason = (c.status === 'issue' || c.status === 'plateau') && st ? st.label : t('noRecentSession');
-    return `<button class="hub-row" data-client-id="${c.id}"><span class="hub-row__name">${escHtml(c.name)}</span><span class="hub-row__meta">${escHtml(reason)}</span></button>`;
+    const reason = (c.status === 'issue' || c.status === 'plateau') && st ? st.label : 'No recent session';
+    return `<button class="hub-row" data-client-id="${c.id}"><span class="hub-row__name">${escHtml(c.name)}</span><span class="hub-row__meta">${reason}</span></button>`;
   }).join('');
 }
 function renderHomeRecent(sessions, clients) {
   const el = $('home-recent');
-  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('homeNoSessionsYet'))}</div>`; return; }
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
   const byId = Object.fromEntries(clients.map(c => [String(c.id), c.name]));
   el.innerHTML = sessions.slice(0, 8).map(s => {
-    const cn = s.clientId != null ? (byId[String(s.clientId)] || t('unknownClientLabel')) : t('unassignedLabel');
+    const cn = s.clientId != null ? (byId[String(s.clientId)] || 'Unknown client') : 'Unassigned';
     return `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${escHtml(cn)} · ${formatDate(s.startTime)}</span></button>`;
   }).join('');
 }
@@ -3466,18 +2673,18 @@ async function onShowCohort() {
   const grid = $('cohort-grid');
   try {
     const clients = await api('GET', '/clients');
-    $('cohort-title').textContent = tf('cohortTitleWithCount', { n: localizeNumber(clients.length), s: clients.length === 1 ? '' : 's' });
-    if (!clients.length) { grid.innerHTML = `<div class="empty-state">${escHtml(t('noClientsYetHint'))}</div>`; return; }
+    $('cohort-title').textContent = `Cohort · ${clients.length} client${clients.length === 1 ? '' : 's'}`;
+    if (!clients.length) { grid.innerHTML = '<div class="empty-state">No clients yet. Add your first client to start building a cohort.</div>'; return; }
     grid.innerHTML = clients.map(renderClientTile).join('');
   } catch (e) { grid.innerHTML = `<div class="empty-state">${escHtml(e.message)}</div>`; }
 }
 function renderClientTile(c) {
   const st = CLIENT_STATUS[c.status];
-  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : t('noSessionsYetLower');
+  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : 'no sessions yet';
   const n = c.sessionsCount ?? 0;
   return `<button class="client-tile" data-client-id="${c.id}">
-    <div class="client-tile__top"><span class="client-tile__name">${escHtml(c.name)}</span>${st ? `<span class="client-status ${st.cls}">${escHtml(st.label)}</span>` : ''}</div>
-    <div class="client-tile__meta">${tf('sessionCountTemplate', { n: localizeNumber(n), s: n === 1 ? '' : 's' })} · ${last}</div>
+    <div class="client-tile__top"><span class="client-tile__name">${escHtml(c.name)}</span>${st ? `<span class="client-status ${st.cls}">${st.label}</span>` : ''}</div>
+    <div class="client-tile__meta">${n} session${n === 1 ? '' : 's'} · ${last}</div>
     ${c.protocol ? `<div class="client-tile__protocol">${escHtml(c.protocol)}</div>` : ''}
   </button>`;
 }
@@ -3485,7 +2692,7 @@ function renderClientTile(c) {
 // ── Client profile ──
 async function onShowClient() {
   const empty = $('client-empty'), body = $('client-body');
-  if (!selectedClientId) { empty.style.display = ''; empty.textContent = t('clientEmptyState'); body.style.display = 'none'; return; }
+  if (!selectedClientId) { empty.style.display = ''; empty.textContent = 'Select a client from the Cohort view.'; body.style.display = 'none'; return; }
   try {
     const [c, sessions] = await Promise.all([
       api('GET', '/clients/' + selectedClientId),
@@ -3500,13 +2707,13 @@ async function onShowClient() {
     renderClientNotes(c);
   } catch (e) {
     empty.style.display = ''; body.style.display = 'none';
-    empty.textContent = t('couldNotLoadClient') + e.message;
+    empty.textContent = 'Could not load client: ' + e.message;
   }
 }
 function renderClientHeader(c) {
   $('client-name').textContent = c.name;
   const bits = [];
-  if (c.age != null) bits.push(localizeNumber(c.age) + t('yrsSuffix'));
+  if (c.age != null) bits.push(c.age + ' yrs');
   if (c.practicingSince) bits.push(monthsSince(c.practicingSince));
   const st = CLIENT_STATUS[c.status];
   if (st) bits.push(st.label);
@@ -3514,47 +2721,47 @@ function renderClientHeader(c) {
 }
 function renderClientStats(c) {
   const cells = [
-    [t('statSessions'), c.sessionsCount ?? 0],
-    [t('statLastSession'), c.lastSessionAt ? formatDate(c.lastSessionAt) : '—'],
-    [t('statProtocolSince'), c.protocolSince ? formatDate(c.protocolSince) : '—'],
+    ['Sessions', c.sessionsCount ?? 0],
+    ['Last session', c.lastSessionAt ? formatDate(c.lastSessionAt) : '—'],
+    ['Protocol since', c.protocolSince ? formatDate(c.protocolSince) : '—'],
   ];
   $('client-stats').innerHTML = cells.map(([k, v]) =>
-    `<div class="stat"><span class="stat__label">${k}</span><span class="stat__value">${escHtml(typeof v === 'number' ? localizeNumber(v) : String(v))}</span></div>`).join('');
+    `<div class="stat"><span class="stat__label">${k}</span><span class="stat__value">${escHtml(String(v))}</span></div>`).join('');
 }
 function renderClientDots(sessions) {
   const el = $('client-dots');
-  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('noSessionsRecordedClient'))}</div>`; return; }
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions recorded for this client yet.</div>'; return; }
   const maxDur = Math.max(...sessions.map(s => s.duration || 0), 1);
   el.innerHTML = sessions.slice().reverse().map(s => {
     const d = s.duration || 0, size = 14 + Math.round((d / maxDur) * 22);
-    return `<button class="timeline-dot" data-session-id="${s.id}" title="${escHtml(s.name)} · ${d ? formatDuration(d) : t('inProgressLabel')}" style="width:${size}px;height:${size}px"></button>`;
+    return `<button class="timeline-dot" data-session-id="${s.id}" title="${escHtml(s.name)} · ${d ? formatDuration(d) : 'in progress'}" style="width:${size}px;height:${size}px"></button>`;
   }).join('');
 }
 function renderClientSessions(sessions) {
   const el = $('client-sessions');
-  if (!sessions.length) { el.innerHTML = `<div class="empty-state">${escHtml(t('noSessionsYet'))}</div>`; return; }
+  if (!sessions.length) { el.innerHTML = '<div class="empty-state">No sessions yet.</div>'; return; }
   el.innerHTML = sessions.map(s =>
     `<button class="hub-row" data-session-id="${s.id}"><span class="hub-row__name">${escHtml(s.name)}</span><span class="hub-row__meta">${formatDate(s.startTime)} · ${s.duration ? formatDuration(s.duration) : '—'}</span></button>`).join('');
 }
 function renderClientReco(c) {
   const el = $('client-reco');
-  if (!c.protocol && !c.goal) { el.innerHTML = `<div class="empty-state">${escHtml(t('noProtocolSet'))}</div>`; return; }
+  if (!c.protocol && !c.goal) { el.innerHTML = '<div class="empty-state">No protocol set. Use Edit to add one.</div>'; return; }
   el.innerHTML = (c.protocol ? `<div class="reco__protocol">${escHtml(c.protocol)}</div>` : '') +
-    (c.goal ? `<div class="reco__goal">${escHtml(t('goalPrefix'))}${escHtml(c.goal)}</div>` : '');
+    (c.goal ? `<div class="reco__goal">Goal: ${escHtml(c.goal)}</div>` : '');
 }
 function renderClientNotes(c) {
   $('client-notes').innerHTML = c.notes && c.notes.trim()
     ? escHtml(c.notes).replace(/\n/g, '<br>')
-    : `<div class="empty-state">${escHtml(t('noNotesYet'))}</div>`;
+    : '<div class="empty-state">No notes yet.</div>';
 }
 
 // ── Add / edit / back actions ──
 $('btn-add-client').addEventListener('click', async () => {
-  const name = prompt(t('newClientNamePrompt'));
+  const name = prompt('New client name:');
   if (!name || !name.trim()) return;
   try {
     await api('POST', '/clients', { name: name.trim() });
-    showToast(t('clientAddedToast'));
+    showToast('Client added');
     loadClientOptions();
     onShowCohort();
   } catch (e) { showToast(e.message); }
@@ -3562,14 +2769,14 @@ $('btn-add-client').addEventListener('click', async () => {
 $('btn-back-cohort').addEventListener('click', () => showView('cohort'));
 $('btn-edit-client').addEventListener('click', async () => {
   if (!selectedClientId) return;
-  const protocol = prompt(t('protocolPrompt'));
+  const protocol = prompt('Protocol (blank = keep current):');
   if (protocol === null) return;
-  const notes = prompt(t('notesPrompt'));
+  const notes = prompt('Teacher notes (blank = keep current):');
   if (notes === null) return;
   const body = {};
   if (protocol !== '') body.protocol = protocol;
   if (notes !== '') body.notes = notes;
   if (!Object.keys(body).length) return;
-  try { await api('PUT', '/clients/' + selectedClientId, body); showToast(t('toastSaved')); onShowClient(); }
+  try { await api('PUT', '/clients/' + selectedClientId, body); showToast('Saved'); onShowClient(); }
   catch (e) { showToast(e.message); }
 });

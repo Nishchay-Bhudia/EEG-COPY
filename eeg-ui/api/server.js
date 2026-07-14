@@ -1228,7 +1228,7 @@ Examples of off-topic queries you must refuse: weather, sports, coding help, mat
 
 const OFF_TOPIC_REPLY_GU = "હું AI બાબા છું, અને હું ફક્ત તમારા EEG સેશન ડેટા સમજવામાં તમારી મદદ કરી શકું છું. હું અન્ય વિષયો પર પ્રશ્નોના જવાબ આપી શકતો નથી — મને તમારા મગજના તરંગો અથવા ધ્યાન સેશન વિશે કંઈક પૂછો!";
 
-// The app UI has an English/Gujarati toggle (i18n.js) — when the user is in
+// The app UI has an English/Gujarati toggle (useI18n.js) — when the user is in
 // Gujarati mode, AI Baba should answer in Gujarati too, so the experience
 // stays consistent end-to-end rather than only translating chrome around an
 // English AI. Keep Sanskrit/yogic terms (Kshipta, Ekagra, Sattva, ...) as-is
