@@ -18,6 +18,7 @@ import {
   depthMeter,
   sensorSchematic,
 } from '@/lib/instruments';
+import { buildSessionExportTxt, downloadTextFile } from '@/lib/export';
 import { useI18n } from '@/composables/useI18n';
 
 const { t, tf, localizeNumber, translateState } = useI18n();
@@ -34,8 +35,11 @@ function formatDuration(secs) {
 const sessions = ref([]);        // [{ id, name, startTime }]
 const selectedId = ref('');      // bound to the <select>
 const summary = ref(null);       // analytics.summary, or null when nothing to show
-const epochs = ref([]);          // /epochs rows (drive the depth meter)
+const epochs = ref([]);          // /epochs rows (drive the depth meter + export)
+const notes = ref('');           // session notes (read-only display here — edited from Monitor)
 const emptyMessage = ref(t('analyzeEmptyHint'));
+const exporting = ref(false);
+const exportError = ref('');
 
 // summary != null ⇒ we have epoch data → show the instrument grid.
 const hasData = computed(() => summary.value != null);
@@ -62,11 +66,13 @@ const sensorSvg = computed(() => sensorSchematic(summary.value?.avgBands || {}))
 function toEmpty(msg) {
   summary.value = null;
   epochs.value = [];
+  notes.value = '';
   emptyMessage.value = msg;
 }
 
 async function loadSession(id) {
   selectedId.value = id;
+  exportError.value = '';
   if (!id) return;
   try {
     const a = await api('GET', `/sessions/${id}/analytics`);
@@ -77,8 +83,29 @@ async function loadSession(id) {
     const eps = await api('GET', `/sessions/${id}/epochs`).catch(() => []);
     epochs.value = Array.isArray(eps) ? eps : [];
     summary.value = a.summary;
+    const notesData = await api('GET', `/sessions/${id}/notes`).catch(() => ({ content: '' }));
+    notes.value = notesData?.content || '';
   } catch (err) {
     toEmpty(t('couldNotLoadAnalytics') + err.message);
+  }
+}
+
+// Full per-epoch .txt export for offline classifier calibration — see
+// lib/export.js. Intentionally untranslated regardless of UI language.
+async function exportSession() {
+  const id = selectedId.value;
+  if (!id || exporting.value) return;
+  exporting.value = true;
+  exportError.value = '';
+  try {
+    const sessionName = (sessions.value.find((s) => String(s.id) === String(id))?.name) || t('aiBabaSessionFallbackName');
+    const txt = buildSessionExportTxt(sessionName, epochs.value, notes.value);
+    const safeName = sessionName.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60) || 'session';
+    downloadTextFile(safeName + '_export.txt', txt);
+  } catch (err) {
+    exportError.value = t('exportFailedPrefix') + err.message;
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -112,7 +139,11 @@ onMounted(async () => {
         </option>
       </select>
       <span class="analyze__meta">{{ meta }}</span>
+      <button v-if="hasData" class="btn btn-secondary btn-sm" :disabled="exporting" @click="exportSession">
+        {{ exporting ? t('exportingEllipsis') : t('exportSessionTxt') }}
+      </button>
     </header>
+    <div v-if="exportError" class="analyze__export-error">{{ exportError }}</div>
 
     <div v-if="!hasData" class="view-stub">
       <div class="view-stub__card">
@@ -146,6 +177,11 @@ onMounted(async () => {
         <div class="card-label">{{ t('sensorLayoutTitle') }}</div>
         <svg class="an-svg" :viewBox="VIEWBOX.sensor" v-html="sensorSvg"></svg>
         <p class="an-disclaimer">{{ t('sensorDisclaimer') }}</p>
+      </div>
+      <div class="card an-notes-card">
+        <div class="card-label">{{ t('sessionNotesTitle2') }}</div>
+        <p v-if="notes && notes.trim()" class="an-notes">{{ notes }}</p>
+        <p v-else class="an-notes an-notes--empty">{{ t('noNotesRecorded') }}</p>
       </div>
     </div>
   </div>
@@ -207,7 +243,11 @@ onMounted(async () => {
 /* ── Analyze view (P3) ── */
 .analyze { display: flex; flex-direction: column; gap: 16px; }
 .analyze__bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.analyze__meta { font-size: 12px; color: var(--text-muted); }
+.analyze__meta { font-size: 12px; color: var(--text-muted); flex: 1; }
+.analyze__export-error { font-size: 12.5px; color: #C75C5C; }
+.an-notes-card { grid-column: 1 / -1; }
+.an-notes { font-size: 13px; color: var(--text); white-space: pre-wrap; line-height: 1.5; }
+.an-notes--empty { color: var(--text-muted); font-style: italic; }
 .analyze-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
