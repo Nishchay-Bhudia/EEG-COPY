@@ -5,6 +5,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { auth, loadAuth, isElevated, isAdmin, login, logout } from '@/lib/auth';
 import { useI18n } from '@/composables/useI18n';
+import AiBaba from '@/components/AiBaba.vue';
 
 const { lang, setLang, t } = useI18n();
 
@@ -114,6 +115,7 @@ onMounted(loadAuth);
       </nav>
 
       <div class="sidebar__footer">
+        <AiBaba />
         <div class="sidebar__user">
           <span class="sidebar__user-name">{{ auth.user.username }}</span>
           <span class="sidebar__user-role">{{ auth.user.role }}</span>
