@@ -5,16 +5,18 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '@/lib/api';
+import { useI18n } from '@/composables/useI18n';
 
 const route = useRoute();
 const router = useRouter();
+const { t, tf, localizeNumber } = useI18n();
 
-// Status metadata → badge label + CSS class (legacy CLIENT_STATUS map).
+// Status metadata → badge label key + CSS class (legacy CLIENT_STATUS map).
 const CLIENT_STATUS = {
-  plateau:  { label: 'Plateau',         cls: 'status--plateau' },
-  progress: { label: 'Progress',        cls: 'status--progress' },
-  issue:    { label: 'Needs attention', cls: 'status--issue' },
-  new:      { label: 'New',             cls: 'status--new' },
+  plateau:  { labelKey: 'clientStatusPlateau', cls: 'status--plateau' },
+  progress: { labelKey: 'clientStatusProgress', cls: 'status--progress' },
+  issue:    { labelKey: 'clientStatusIssue', cls: 'status--issue' },
+  new:      { labelKey: 'clientStatusNew', cls: 'status--new' },
 };
 
 const clients = ref([]);
@@ -71,10 +73,10 @@ function clearFilter() {
 
 const title = computed(() => {
   const n = visibleClients.value.length;
-  const noun = `client${n === 1 ? '' : 's'}`;
+  const s = n === 1 ? '' : 's';
   return flaggedOnly.value
-    ? `Cohort · ${n} need${n === 1 ? 's' : ''} attention`
-    : `Cohort · ${n} ${noun}`;
+    ? tf('cohortTitleNeedsAttention', { n: localizeNumber(n), s })
+    : tf('cohortTitleWithCount', { n: localizeNumber(n), s });
 });
 
 function formatDate(isoStr) {
@@ -83,13 +85,14 @@ function formatDate(isoStr) {
 }
 
 function statusFor(c) {
-  return CLIENT_STATUS[c.status] || null;
+  const s = CLIENT_STATUS[c.status];
+  return s ? { label: t(s.labelKey), cls: s.cls } : null;
 }
 
 function metaFor(c) {
   const n = c.sessionsCount ?? 0;
-  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : 'no sessions yet';
-  return `${n} session${n === 1 ? '' : 's'} · ${last}`;
+  const last = c.lastSessionAt ? formatDate(c.lastSessionAt) : t('noSessionsYetLower');
+  return `${tf('sessionCountTemplate', { n: localizeNumber(n), s: n === 1 ? '' : 's' })} · ${last}`;
 }
 
 async function load() {
@@ -107,7 +110,7 @@ async function load() {
 }
 
 async function addClient() {
-  const name = prompt('New client name:');
+  const name = prompt(t('newClientNamePrompt'));
   if (!name || !name.trim()) return;
   try {
     await api('POST', '/clients', { name: name.trim() });
@@ -124,27 +127,21 @@ onMounted(load);
   <section class="view">
     <div class="hub-head">
       <h2>{{ title }}</h2>
-      <button class="btn btn-primary btn-sm" @click="addClient">
-        <span class="btn-icon">＋</span> Add client
-      </button>
+      <button class="btn btn-primary btn-sm" @click="addClient">{{ t('addClient') }}</button>
     </div>
-    <div class="hint">Click a client to open their profile.</div>
+    <div class="hint">{{ t('cohortHint') }}</div>
 
     <div v-if="flaggedOnly" class="filter-bar">
       <span class="filter-pill">
-        Needs attention
-        <button class="filter-pill__x" title="Clear filter" @click="clearFilter">✕</button>
+        {{ t('needsAttention') }}
+        <button class="filter-pill__x" :title="t('clearFilterTitle')" @click="clearFilter">✕</button>
       </span>
-      <button class="filter-clear" @click="clearFilter">Show all clients</button>
+      <button class="filter-clear" @click="clearFilter">{{ t('showAllClients') }}</button>
     </div>
 
     <div v-if="error" class="empty-state">{{ error }}</div>
-    <div v-else-if="!clients.length" class="empty-state">
-      No clients yet. Add your first client to start building a cohort.
-    </div>
-    <div v-else-if="!visibleClients.length" class="empty-state">
-      No clients need attention right now — everyone's on track.
-    </div>
+    <div v-else-if="!clients.length" class="empty-state">{{ t('noClientsYetHint') }}</div>
+    <div v-else-if="!visibleClients.length" class="empty-state">{{ t('noClientsNeedAttention') }}</div>
     <div v-else class="cohort-grid">
       <router-link
         v-for="c in visibleClients"
@@ -170,7 +167,7 @@ onMounted(load);
           </svg>
           <span class="trend__read">{{ spark(c.id).read }}</span>
         </div>
-        <div v-else class="trend trend--empty">no depth data yet</div>
+        <div v-else class="trend trend--empty">{{ t('noDepthDataYet') }}</div>
 
         <div v-if="c.protocol" class="client-tile__protocol">{{ c.protocol }}</div>
       </router-link>

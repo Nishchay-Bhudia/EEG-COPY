@@ -7,9 +7,11 @@ import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '@/lib/api';
 import { CLIENT_STATUS, monthsSince, formatDate, formatDuration } from '@/lib/clients';
+import { useI18n } from '@/composables/useI18n';
 
 const route = useRoute();
 const router = useRouter();
+const { t, tf, localizeNumber } = useI18n();
 
 const clientId = computed(() => route.query.id || null);
 
@@ -33,7 +35,7 @@ async function load() {
     client.value = c;
     sessions.value = Array.isArray(s) ? s : [];
   } catch (e) {
-    error.value = 'Could not load client: ' + e.message;
+    error.value = t('couldNotLoadClient') + e.message;
   } finally {
     loading.value = false;
   }
@@ -48,9 +50,9 @@ const metaBits = computed(() => {
   const c = client.value;
   if (!c) return [];
   const bits = [];
-  if (c.age != null) bits.push(c.age + ' yrs');
+  if (c.age != null) bits.push(localizeNumber(c.age) + t('yrsSuffix'));
   if (c.practicingSince) bits.push(monthsSince(c.practicingSince));
-  if (status.value) bits.push(status.value.label);
+  if (status.value) bits.push(t(status.value.labelKey));
   return bits;
 });
 
@@ -58,9 +60,9 @@ const stats = computed(() => {
   const c = client.value;
   if (!c) return [];
   return [
-    { label: 'Sessions', value: c.sessionsCount ?? 0 },
-    { label: 'Last session', value: c.lastSessionAt ? formatDate(c.lastSessionAt) : '—' },
-    { label: 'Protocol since', value: c.protocolSince ? formatDate(c.protocolSince) : '—' },
+    { label: t('statSessions'), value: localizeNumber(c.sessionsCount ?? 0) },
+    { label: t('statLastSession'), value: c.lastSessionAt ? formatDate(c.lastSessionAt) : '—' },
+    { label: t('statProtocolSince'), value: c.protocolSince ? formatDate(c.protocolSince) : '—' },
   ];
 });
 
@@ -75,7 +77,7 @@ const dots = computed(() => {
     return {
       id: s.id,
       size,
-      title: `${s.name} · ${d ? formatDuration(d) : 'in progress'}`,
+      title: `${s.name} · ${d ? formatDuration(d) : t('inProgressLabel')}`,
     };
   });
 });
@@ -94,15 +96,15 @@ function backToCohort() {
 async function createLogin() {
   if (!clientId.value) return;
   const suggested = (client.value?.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const username = prompt('Choose a username for this student:', suggested);
+  const username = prompt(t('promptUsernameForStudent'), suggested);
   if (username === null || !username.trim()) return;
-  const password = prompt('Choose a password (min 6 characters) — share it with the student:');
+  const password = prompt(t('promptPasswordForStudent'));
   if (password === null || !password) return;
   try {
     await api('POST', '/clients/' + clientId.value + '/create-login',
       { username: username.trim(), password });
     await load();
-    alert(`Done. ${client.value?.name || 'The student'} signs in as "${username.trim()}" — their sittings will appear under this client, and you can watch them live from Watch Live.`);
+    alert(t('createLoginDonePrefix') + (client.value?.name || t('theStudentFallback')) + t('createLoginDoneMid') + username.trim() + t('createLoginDoneSuffix'));
   } catch (e) {
     error.value = e.message;
   }
@@ -113,11 +115,7 @@ async function createLogin() {
 async function linkAccount() {
   if (!clientId.value) return;
   const current = client.value?.linkedUsername || '';
-  const uname = prompt(
-    'Link to a login account (username). Blank removes the link.\n' +
-    'While linked, you can watch this student\'s live sittings — they see a "being watched" indicator.',
-    current
-  );
+  const uname = prompt(t('promptLinkAccount'), current);
   if (uname === null || uname.trim() === current) return;
   try {
     await api('PUT', '/clients/' + clientId.value, { linkedUsername: uname.trim() });
@@ -129,9 +127,9 @@ async function linkAccount() {
 
 async function editClient() {
   if (!clientId.value) return;
-  const protocol = prompt('Protocol (blank = keep current):');
+  const protocol = prompt(t('promptProtocol'));
   if (protocol === null) return;
-  const notes = prompt('Teacher notes (blank = keep current):');
+  const notes = prompt(t('promptTeacherNotes'));
   if (notes === null) return;
   const body = {};
   if (protocol !== '') body.protocol = protocol;
@@ -149,9 +147,9 @@ async function editClient() {
 <template>
   <section class="view-client">
     <!-- Empty / error states -->
-    <div v-if="!clientId" class="empty-state">Select a client from the Cohort view.</div>
+    <div v-if="!clientId" class="empty-state">{{ t('clientEmptyState') }}</div>
     <div v-else-if="error" class="empty-state">{{ error }}</div>
-    <div v-else-if="loading" class="empty-state">Loading…</div>
+    <div v-else-if="loading" class="empty-state">{{ t('loading') }}</div>
 
     <!-- Profile body -->
     <div v-else-if="client">
@@ -161,21 +159,21 @@ async function editClient() {
           <div class="profile-meta">{{ metaBits.join(' · ') }}</div>
         </div>
         <div class="profile-actions">
-          <button class="btn btn-ghost btn-sm" @click="editClient">Edit</button>
+          <button class="btn btn-ghost btn-sm" @click="editClient">{{ t('edit') }}</button>
           <template v-if="client?.linkedUsername">
-            <button class="btn btn-ghost btn-sm" :title="'Signs in as ' + client.linkedUsername + ' — click to change/unlink'" @click="linkAccount">
+            <button class="btn btn-ghost btn-sm" :title="t('signsInAsPrefix') + client.linkedUsername + t('signsInAsSuffix')" @click="linkAccount">
               🔗 {{ client.linkedUsername }}
             </button>
           </template>
           <template v-else>
-            <button class="btn btn-ghost btn-sm" title="Create this student's login (account + link, one step)" @click="createLogin">
-              Create login
+            <button class="btn btn-ghost btn-sm" :title="t('createLoginTitle')" @click="createLogin">
+              {{ t('createLoginBtn') }}
             </button>
-            <button class="btn btn-ghost btn-sm" title="Link an existing account instead" @click="linkAccount">
-              Link account
+            <button class="btn btn-ghost btn-sm" :title="t('linkAccountTitle')" @click="linkAccount">
+              {{ t('linkAccountBtn') }}
             </button>
           </template>
-          <button class="btn btn-ghost btn-sm" @click="backToCohort">← Cohort</button>
+          <button class="btn btn-ghost btn-sm" @click="backToCohort">{{ t('backToCohort') }}</button>
         </div>
       </div>
 
@@ -189,9 +187,9 @@ async function editClient() {
       <div class="profile-grid">
         <div class="client-col-main">
           <div class="card">
-            <div class="card-label">SESSION TIMELINE</div>
+            <div class="card-label">{{ t('sessionTimelineTitle') }}</div>
             <div class="session-timeline__chart">
-              <div v-if="!dots.length" class="empty-state">No sessions recorded for this client yet.</div>
+              <div v-if="!dots.length" class="empty-state">{{ t('noSessionsRecordedClient') }}</div>
               <button
                 v-for="d in dots"
                 :key="d.id"
@@ -201,13 +199,13 @@ async function editClient() {
                 @click="openReplay(d.id)"
               ></button>
             </div>
-            <div class="hint">Dot size = session length · click a session to replay it</div>
+            <div class="hint">{{ t('sessionTimelineHint') }}</div>
           </div>
 
           <div class="card">
-            <div class="card-label">RECENT SESSIONS</div>
+            <div class="card-label">{{ t('recentSessions') }}</div>
             <div class="hub-list">
-              <div v-if="!sessions.length" class="empty-state">No sessions yet.</div>
+              <div v-if="!sessions.length" class="empty-state">{{ t('homeNoSessionsYet') }}</div>
               <button
                 v-for="s in sessions"
                 :key="s.id"
@@ -225,20 +223,18 @@ async function editClient() {
 
         <div class="client-col-side">
           <div class="card">
-            <div class="card-label">PROTOCOL</div>
-            <div v-if="!client.protocol && !client.goal" class="empty-state">
-              No protocol set. Use Edit to add one.
-            </div>
+            <div class="card-label">{{ t('protocolTitle') }}</div>
+            <div v-if="!client.protocol && !client.goal" class="empty-state">{{ t('noProtocolSet') }}</div>
             <template v-else>
               <div v-if="client.protocol" class="reco__protocol">{{ client.protocol }}</div>
-              <div v-if="client.goal" class="reco__goal">Goal: {{ client.goal }}</div>
+              <div v-if="client.goal" class="reco__goal">{{ t('goalPrefix') }}{{ client.goal }}</div>
             </template>
           </div>
 
           <div class="card">
-            <div class="card-label">TEACHER NOTES</div>
+            <div class="card-label">{{ t('teacherNotesTitle') }}</div>
             <div v-if="client.notes && client.notes.trim()" class="client-notes">{{ client.notes }}</div>
-            <div v-else class="empty-state">No notes yet.</div>
+            <div v-else class="empty-state">{{ t('noNotesYet') }}</div>
           </div>
         </div>
       </div>

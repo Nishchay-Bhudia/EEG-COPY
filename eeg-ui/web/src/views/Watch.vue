@@ -11,6 +11,9 @@ import ReadingPanel from '@/components/ReadingPanel.vue';
 import { api, getToken, apiBase, isDotnet } from '@/lib/api';
 import { buildHub } from '@/lib/live';
 import { mapAnalyzeResponse, createSmoother } from '@/lib/analysis';
+import { useI18n } from '@/composables/useI18n';
+
+const { t, localizeNumber } = useI18n();
 
 const watchable = ref([]);           // [{ clientId, name, username, netSessionId, startedAt }]
 const listError = ref('');
@@ -33,7 +36,7 @@ async function loadWatchable() {
     watchable.value = await api('GET', '/live/watchable');
     listError.value = '';
   } catch (err) {
-    listError.value = err.message || 'Could not load live students';
+    listError.value = err.message || t('couldNotLoadLiveStudents');
   }
 }
 
@@ -62,7 +65,7 @@ async function startWatching(client) {
     // The backend signals unauthorized/ended via an "error" event (never throws).
     hubConn.on('error', (e) => {
       status.value = 'error';
-      errorMsg.value = (e && e.error) || 'The session is no longer available.';
+      errorMsg.value = (e && e.error) || t('sessionNoLongerAvailable');
     });
     hubConn.onclose(() => { if (status.value === 'watching') status.value = 'idle'; });
 
@@ -71,7 +74,7 @@ async function startWatching(client) {
     // Stay in 'connecting' until the first analysis arrives (or an error fires).
   } catch (err) {
     status.value = 'error';
-    errorMsg.value = err.message || 'Could not connect to the live session.';
+    errorMsg.value = err.message || t('couldNotConnectLiveSession');
     await teardown();
   }
 }
@@ -94,7 +97,7 @@ async function teardown() {
 function fmtSince(iso) {
   if (!iso) return '';
   const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
-  return mins < 1 ? 'just now' : `${mins} min`;
+  return mins < 1 ? t('justNow') : `${localizeNumber(mins)}${t('minAgo')}`;
 }
 
 onMounted(() => {
@@ -110,30 +113,27 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="watch">
-    <div class="topbar"><div class="topbar__title">Watch a Live Session</div></div>
+    <div class="topbar"><div class="topbar__title">{{ t('watchTitle') }}</div></div>
 
     <!-- ─ Live students ─ -->
     <div class="card connect-card">
       <div class="connect-head">
-        <span class="card-label">YOUR STUDENTS · LIVE NOW</span>
-        <button v-if="!isWatching" class="btn btn-ghost btn-sm" @click="loadWatchable">Refresh</button>
+        <span class="card-label">{{ t('watchStudentsLiveNow') }}</span>
+        <button v-if="!isWatching" class="btn btn-ghost btn-sm" @click="loadWatchable">{{ t('refresh') }}</button>
       </div>
-      <p class="connect-hint">
-        Students appear here when their linked account goes live. They see a
-        "being watched" indicator the moment you join, and can stop anytime.
-      </p>
+      <p class="connect-hint">{{ t('watchHint') }}</p>
       <div v-if="listError" class="connect-error">{{ listError }}</div>
 
       <div v-if="!isWatching">
-        <div v-if="!watchable.length" class="live-empty">No linked students are live right now.</div>
+        <div v-if="!watchable.length" class="live-empty">{{ t('noLiveStudents') }}</div>
         <div v-for="c in watchable" :key="c.clientId" class="live-row">
           <span class="live-dot">●</span>
           <div class="live-who">
             <span class="live-name">{{ c.name }}</span>
-            <span class="live-sub">{{ c.username }} · live {{ fmtSince(c.startedAt) }}</span>
+            <span class="live-sub">{{ c.username }} · {{ t('liveNowWord') }} {{ fmtSince(c.startedAt) }}</span>
           </div>
           <button class="btn btn-primary btn-sm" @click="startWatching(c)">
-            <span class="btn-icon">👁</span> Watch
+            <span class="btn-icon">👁</span> {{ t('watchBtn') }}
           </button>
         </div>
       </div>
@@ -141,16 +141,16 @@ onBeforeUnmount(() => {
       <div v-else class="watching-row">
         <span class="status-dot" :class="status === 'watching' ? 'bluetooth' : status === 'connecting' ? 'waking' : 'error'"></span>
         <span class="status-text">
-          <template v-if="status === 'connecting'">connecting to {{ watchingName }}…</template>
-          <template v-else>watching <strong>{{ watchingName }}</strong> · {{ epochsSeen }} epoch{{ epochsSeen === 1 ? '' : 's' }}</template>
+          <template v-if="status === 'connecting'">{{ t('connectingToPrefix') }}{{ watchingName }}…</template>
+          <template v-else>{{ t('watchingPrefix') }}<strong>{{ watchingName }}</strong> · {{ localizeNumber(epochsSeen) }}{{ epochsSeen === 1 ? t('epochSingular') : t('epochPlural') }}</template>
         </span>
         <button class="btn btn-danger btn-sm" @click="stopWatching">
-          <span class="btn-icon">⏹</span> Stop
+          <span class="btn-icon">⏹</span> {{ t('stopBtn') }}
         </button>
       </div>
       <div v-if="status === 'error'" class="connect-error">
         {{ errorMsg }}
-        <button class="btn btn-ghost btn-sm" @click="stopWatching">Back</button>
+        <button class="btn btn-ghost btn-sm" @click="stopWatching">{{ t('backBtn') }}</button>
       </div>
     </div>
 
@@ -159,7 +159,7 @@ onBeforeUnmount(() => {
       <ReadingPanel :reading="reading" :has-p-p-g="hasVitals" />
     </div>
     <div v-else-if="status === 'connecting'" class="waiting">
-      Waiting for {{ watchingName }}'s first epoch…
+      {{ t('waitingForFirstEpochPrefix') }}{{ watchingName }}{{ t('waitingForFirstEpochSuffix') }}
     </div>
   </div>
 </template>
