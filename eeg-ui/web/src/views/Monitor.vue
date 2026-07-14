@@ -193,6 +193,32 @@ function storeEpoch(r) {
     tattvaFlags: r.tattva_flags || [],
     bloodOxygen: r.blood_oxygen != null ? r.blood_oxygen : null,
     heartRate: r.heart_rate != null ? r.heart_rate : null,
+    // Inner Texture (v3 deep-state features).
+    vrittiIndex: r.vritti_index ?? null,
+    nirodhaState: r.nirodha_state || null,
+    complexity: r.complexity ? {
+      lziv: r.complexity.lziv ?? null,
+      higuchiFd: r.complexity.higuchi_fd ?? null,
+      sampleEntropy: r.complexity.sample_entropy ?? null,
+      permEntropy: r.complexity.perm_entropy ?? null,
+    } : null,
+    aperiodic: r.aperiodic ? {
+      exponent: r.aperiodic.exponent ?? null,
+      offset: r.aperiodic.offset ?? null,
+    } : null,
+    // Full-fidelity fields for offline classifier calibration (session export) —
+    // all of these are already computed live in the reading object; without
+    // capturing them here, Replay/Analyze and the Export TXT feature only ever
+    // see the winning state, never the full picture behind it.
+    probabilities: ch.probabilities || null,
+    corroboration: ch.corroboration || null,
+    faa: r.faa ?? null,
+    plv: r.connectivity?.plv ?? null,
+    lowBetaPower: spectrum.low_beta ?? null,
+    highBetaPower: spectrum.high_beta ?? null,
+    dataQuality: r.data_quality || null,
+    swaraNote: sw.note || null,
+    latencyMs: r.latency_ms ?? null,
   };
   api('POST', '/sessions/' + activeSession.value.id + '/epoch', body)
     .catch(err => console.warn('[Epoch store] failed:', err.message));

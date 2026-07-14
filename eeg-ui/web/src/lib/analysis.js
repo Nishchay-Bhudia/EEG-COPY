@@ -68,6 +68,9 @@ function fft(signal) {
   return mags;
 }
 
+// Band edges match the .NET analyser's FeatureExtractor exactly (delta 0.5-4,
+// theta 4-8, alpha 8-13, low_beta 13-18, high_beta 18-30, gamma 30-50) so the
+// local fallback's Rajas marker (high-beta) lines up with the real classifier.
 function bandPowers(mags, sr, sz) {
   const res = sr / sz;
   const bin = hz => Math.round(hz / res);
@@ -76,9 +79,9 @@ function bandPowers(mags, sr, sz) {
     for (let b = bin(lo); b <= Math.min(bin(hi), mags.length - 1); b++) s += mags[b] * mags[b];
     return s;
   };
-  const d = sum(0.5, 4), t = sum(4, 8), a = sum(8, 13), be = sum(13, 30), g = sum(30, 50);
-  const tot = d + t + a + be + g || 1;
-  return { delta: d / tot, theta: t / tot, alpha: a / tot, beta: be / tot, gamma: g / tot };
+  const d = sum(0.5, 4), t = sum(4, 8), a = sum(8, 13), lb = sum(13, 18), hb = sum(18, 30), g = sum(30, 50);
+  const tot = d + t + a + lb + hb + g || 1;
+  return { delta: d / tot, theta: t / tot, alpha: a / tot, low_beta: lb / tot, high_beta: hb / tot, beta: (lb + hb) / tot, gamma: g / tot };
 }
 
 function softmax(logits) {
@@ -86,9 +89,54 @@ function softmax(logits) {
   return ex.map(e => e / s);
 }
 
+function pearsonCorr(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 2) return 0;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { const xa = a[i] - ma, xb = b[i] - mb; num += xa * xb; da += xa * xa; db += xb * xb; }
+  return num / (Math.sqrt(da * db) || 1e-9);
+}
+
+// Local Guna classifier — faithful port of the backend's GunaClassifier +
+// GunaBlend (eeg-backend/src/NeuroYogic.Analysis/Classification/GunaClassifier.cs,
+// GunaBlend.cs). Used only when the .NET analyser is unreachable, so this fallback
+// no longer silently drops Gunas/vṛtti.
+function classifyGunasLocal(bp, faa, plv, swaraNadi) {
+  const relu = x => Math.max(0, x);
+  // v4 fix: coherence bonus gated by alpha (see GunaClassifier.cs) — a flat
+  // bonus let low-alpha/high-beta readings score falsely Sattvic off PLV alone.
+  let sat = bp.alpha * 4.5 + bp.theta * 2.5 + bp.low_beta * 0.8 + relu(plv - 0.50) * bp.alpha * 7.0 + relu(0.20 - Math.abs(faa)) * 1.5;
+  let raj = bp.high_beta * 5.5 + relu(0.20 - bp.alpha) * 2.0 + relu(faa) * 1.8 + relu(bp.gamma - 0.10) * 0.8;
+  let tam = bp.delta * 4.5 + relu(0.15 - bp.alpha) * 2.5 + relu(0.06 - bp.gamma) * 2.0 + relu(0.45 - plv) * 1.0;
+
+  if (swaraNadi === 'sushumna') { sat += 0.20; raj = Math.max(0, raj - 0.10); }
+  else if (swaraNadi === 'pingala') { raj += 0.15; sat = Math.max(0, sat - 0.05); }
+  else if (swaraNadi === 'ida') { if (bp.delta > 0.30) tam += 0.10; else sat += 0.08; }
+
+  sat = Math.max(sat, 0.01); raj = Math.max(raj, 0.01); tam = Math.max(tam, 0.01);
+  const total = sat + raj + tam;
+  const sattva = sat / total, rajas = raj / total, tamas = tam / total;
+
+  const ranked = [['Sattva', sattva], ['Rajas', rajas], ['Tamas', tamas]].sort((a, b) => b[1] - a[1]);
+  const [g1, v1] = ranked[0], [g2] = ranked[1], [, v3] = ranked[2];
+  const adj = { Sattva: 'Sattvic', Rajas: 'Rajasic', Tamas: 'Tamasic' };
+  let label;
+  if (v1 - v3 < 0.12) label = 'Balanced (all three)';
+  else if (ranked[1][1] >= 0.50 * v1) label = `${adj[g1]}-predominant, ${adj[g2]}-secondary`;
+  else label = adj[g1];
+
+  return { sattva, rajas, tamas, label };
+}
+
 // classifyLocal — returns a reading WITHOUT epoch/latency (the caller assigns
 // those, mirroring the legacy global `epoch` counter which now lives in Monitor).
-function classifyLocal(bp) {
+// `faa` and `plv` are computed by the caller from the real left/right channel
+// pair (see analyzeLocal below) — this used to be `Math.random()`, which made
+// Swara AND every guna/vṛtti figure derived from it meaningless noise.
+function classifyLocal(bp, faa, plv) {
   const states = ['Kshipta', 'Vikshipta', 'Ekagra', 'Niruddha'];
   const logits = [
     bp.beta * 3.0 + bp.gamma * 1.5 - bp.alpha * 1.5,
@@ -102,6 +150,12 @@ function classifyLocal(bp) {
   const probMap = {};
   states.forEach((s, i) => { probMap[s] = (probs[i] * 100).toFixed(1) + '%'; });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // DO NOT TOUCH — Swara/Nadi. Kept exactly as originally validated (random-
+  // jitter asym, ±0.04 threshold) rather than wired to the real per-channel
+  // FAA computed below. If tempted to "fix" this to use real FAA again,
+  // don't — ask first.
+  // ─────────────────────────────────────────────────────────────────────────
   const asym = (Math.random() - 0.5) * 0.3;
   const isIda = asym < -0.04, isPingala = asym > 0.04;
   const swaraState = isIda ? 'Ida Nadi — right hemisphere dominant'
@@ -109,11 +163,23 @@ function classifyLocal(bp) {
       : 'Sushumna — both nadis balanced';
   const swaraNote = isIda ? SWARA_NOTES.ida : isPingala ? SWARA_NOTES.pingala : SWARA_NOTES.sushumna;
 
+  // Gunas/vṛtti still use the REAL per-channel FAA (not the display-only `asym`
+  // above) — the swara-secondary term in the guna formula needs the accurate
+  // nadi, since guna classification is meant to be as accurate as the backend's.
+  const swaraNadi = faa < -0.15 ? 'ida' : faa > 0.15 ? 'pingala' : 'sushumna';
+
   const tattva = [];
-  if (bp.alpha > 0.35 && bp.theta < 0.25) tattva.push('Pratyahara Window');
-  if (bp.theta > 0.28 && bp.alpha > 0.28) tattva.push('Potential Tattva Activation');
-  if (bp.theta > 0.32 && bp.delta > 0.12) tattva.push('Turiya Approach');
   if (bp.gamma > 0.12) tattva.push('Gamma Spike');
+  if (bp.theta > 0.25 && bp.high_beta < 0.10) tattva.push('Pratyahara Window');
+  if (bp.delta > 0.35 && bp.alpha > 0.15) tattva.push('Turiya Approach');
+  if (plv > 0.80 && Math.abs(faa) < 0.10) tattva.push('Sushumna Activated');
+  if (bp.high_beta > 0.30) tattva.push('High-Beta Agitation');
+  if (bp.delta > 0.40 && bp.alpha < 0.10) tattva.push('Tamasic State');
+
+  const gunas = classifyGunasLocal(bp, faa, plv, swaraNadi);
+  // Same formula as VedanticAnalyzer.VrittiIndex.
+  const vritti = Math.max(0, Math.min(1, 1.6 * bp.high_beta + 0.35 * (1 - plv) - 0.15));
+  const nirodhaState = nirodhaLabel(vritti);
 
   const depth = CHITTA_DEPTHS[state];
   return {
@@ -123,21 +189,57 @@ function classifyLocal(bp) {
     band_powers: { relative: bp },
     eeg_spectrum: bp,
     alpha_asymmetry: asym,
+    // DO NOT TOUCH note above applies to alpha_asymmetry (drives the swara
+    // display/asym-thumb, deliberately the jittered value) — `faa` is a
+    // separate field carrying the REAL per-channel asymmetry already used
+    // for the actual guna/vritti math above, kept distinct so epoch export
+    // gets accurate data without changing anything about the swara display.
+    faa,
+    connectivity: { plv },
     tattva_flags: tattva,
     contemplative_depth: depth,
+    gunas,
+    vritti_index: vritti,
+    nirodha_state: nirodhaState,
   };
 }
 
 // Local FFT fallback over a completed-epoch snapshot. Returns a reading (no
 // epoch/latency) or null when there is not enough signal. Ported from the tail
-// of legacy processBluetoothEEG().
+// of legacy processBluetoothEEG() — per-channel bands so FAA/PLV/Gunas aren't
+// guesswork. Previously only channel 0 was used and FAA was `Math.random()`,
+// which made Swara and every guna/vṛtti figure derived from it meaningless.
 export function analyzeLocal(snapshot, sampleRate) {
-  const signal = (snapshot && snapshot[0]) || [];
-  if (signal.length < 64) return null;
-  const sz = Math.pow(2, Math.floor(Math.log2(signal.length)));
-  const mags = fft(signal.slice(-sz));
-  const bp = bandPowers(mags, sampleRate, sz);
-  return classifyLocal(bp);
+  const chBp = [];
+  for (let c = 0; c < (snapshot ? snapshot.length : 0); c++) {
+    const sig = snapshot[c] || [];
+    if (sig.length < 64) continue;
+    const sz = Math.pow(2, Math.floor(Math.log2(sig.length)));
+    chBp.push({ ch: c, bp: bandPowers(fft(sig.slice(-sz)), sampleRate, sz) });
+  }
+  if (!chBp.length) return null;
+
+  // Whole-head average band powers (same convention as the .NET analyser).
+  const bp = {};
+  for (const k of ['delta', 'theta', 'alpha', 'low_beta', 'high_beta', 'beta', 'gamma']) {
+    bp[k] = chBp.reduce((s, x) => s + x.bp[k], 0) / chBp.length;
+  }
+
+  // Left = channels 0,1 (TP9,AF7); Right = channels 2,3 (AF8,TP10) — same
+  // hemisphere assignment as the analyser's FeatureExtractor default indices.
+  const leftCh = chBp.filter(x => x.ch < 2), rightCh = chBp.filter(x => x.ch >= 2);
+  const leftAlpha = leftCh.length ? leftCh.reduce((s, x) => s + x.bp.alpha, 0) / leftCh.length : bp.alpha;
+  const rightAlpha = rightCh.length ? rightCh.reduce((s, x) => s + x.bp.alpha, 0) / rightCh.length : bp.alpha;
+  const faa = Math.max(-2, Math.min(2, Math.log(rightAlpha + 1e-9) - Math.log(leftAlpha + 1e-9)));
+
+  // PLV proxy: |correlation| between a left- and a right-hemisphere channel's raw
+  // signal — not a true Hilbert-phase PLV (that always comes from the analyser),
+  // but a reasonable coherence stand-in for this degraded fallback path.
+  const plv = snapshot.length >= 3
+    ? Math.max(0, Math.min(1, Math.abs(pearsonCorr(snapshot[0], snapshot[2]))))
+    : 0.5;
+
+  return classifyLocal(bp, faa, plv);
 }
 
 // Map the Render backend /analyze JSON into a reading (no epoch/latency).
@@ -161,6 +263,7 @@ export function mapAnalyzeResponse(data) {
     tattva_flags: data.tattva_flags || data.tattva || [],
     contemplative_depth: data.chitta_bhumi?.depth || data.depth || '—',
     alpha_asymmetry: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? 0,
+    faa: data.hemispheric_asymmetry?.asymmetry ?? data.alpha_asymmetry ?? null,
     eeg_spectrum: data.eeg_spectrum || data.band_relative || null,
     gunas: data.gunas || null,
     vritti_index: data.vritti_index ?? null,
@@ -403,6 +506,7 @@ export function createDemoSource() {
       band_powers: { relative: bp },
       eeg_spectrum: bp,
       alpha_asymmetry: faa,
+      faa,
       tattva_flags: tattva,
       contemplative_depth: depth,
       gunas,

@@ -211,10 +211,19 @@ const MuseDriver = {
         buf.set(payload, 1);
         return buf;
       };
+      // Preset 21 is EEG-only and never turns the optical (PPG) sensors on —
+      // confirmed against the reference muse-js implementation (urish/muse-js
+      // src/muse.ts): preset 50 is the one that enables EEG + PPG together.
+      // p21 was why heart rate/SpO2 never streamed even though the PPG
+      // characteristics were subscribed below. Also matches muse-js's exact
+      // command sequence: halt -> preset -> 's' -> resume (the 's' write was
+      // previously missing here).
       await controlChar.writeValue(museCmd('h'));    // halt any prior streaming
       await new Promise(r => setTimeout(r, 300));
-      await controlChar.writeValue(museCmd('p21'));  // preset 21 = EEG mode
-      await new Promise(r => setTimeout(r, 300));
+      await controlChar.writeValue(museCmd('p50'));  // preset 50 = EEG + PPG
+      await new Promise(r => setTimeout(r, 150));
+      await controlChar.writeValue(museCmd('s'));    // apply preset
+      await new Promise(r => setTimeout(r, 150));
       await controlChar.writeValue(museCmd('d'));    // start streaming
       await new Promise(r => setTimeout(r, 500));    // let stream initialise before subscribing
     }
@@ -354,8 +363,16 @@ export function useDriver() {
   function pushSamples(ch, samples) {
     if (!bleChannels[ch]) return;
     bleChannels[ch].push(...samples);
-    bufferCount.value = Math.min(bleChannels[0].length, COLLECT_N);
-    if (bleChannels[0].length >= COLLECT_N) completeEpoch();
+
+    // Each channel is pushed to independently as its own BLE notifications
+    // arrive, so channels don't necessarily fill at the same rate. Gate on the
+    // SLOWEST channel (not just channel 0) — triggering as soon as channel 0
+    // alone reached COLLECT_N let completeEpoch() snapshot the other channels
+    // while they were still short, producing mismatched channel lengths that
+    // the backend correctly rejects with a 400.
+    const minLen = Math.min(...bleChannels.map(c => c.length));
+    bufferCount.value = Math.min(minLen, COLLECT_N);
+    if (minLen >= COLLECT_N) completeEpoch();
   }
 
   // Snapshot the 4 s window, reset buffers, and publish the completed epoch.
