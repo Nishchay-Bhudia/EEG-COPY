@@ -4,21 +4,24 @@
 // Nav items map 1:1 to the legacy [data-nav] buttons and their router paths.
 import { computed, onMounted, reactive, ref } from 'vue';
 import { auth, loadAuth, isElevated, isAdmin, login, logout } from '@/lib/auth';
+import { useI18n } from '@/composables/useI18n';
+
+const { lang, setLang, t } = useI18n();
 
 // Role model: superadmin (admin) creates instructors; instructors (co-admin)
 // admin students; students (user) only sit. Teaching views are instructor-tier;
 // a student's sidebar is just the Monitor + Replay of their own sittings.
 const navItems = [
-  { to: '/monitor', ico: '📡', label: 'Live Monitor' },
-  { to: '/watch', ico: '👁', label: 'Watch Live', elevated: true },
-  { to: '/home', ico: '◇', label: 'This Week', elevated: true },
-  { to: '/cohort', ico: '◎', label: 'Cohort', elevated: true },
-  { to: '/client', ico: '○', label: 'Clients', elevated: true },
-  { to: '/replay', ico: '↺', label: 'Replay' },
-  { to: '/analyze', ico: '◈', label: 'Analyze', elevated: true },
-  { to: '/prescribe', ico: '✎', label: 'Prescribe', elevated: true },
-  { to: '/practices', ico: '☸', label: 'Practices', admin: true },
-  { to: '/users', ico: '👥', label: 'Users', admin: true },
+  { to: '/monitor', ico: '📡', labelKey: 'navLiveMonitor' },
+  { to: '/watch', ico: '👁', labelKey: 'navWatchLive', elevated: true },
+  { to: '/home', ico: '◇', labelKey: 'navThisWeek', elevated: true },
+  { to: '/cohort', ico: '◎', labelKey: 'navCohort', elevated: true },
+  { to: '/client', ico: '○', labelKey: 'navClients', elevated: true },
+  { to: '/replay', ico: '↺', labelKey: 'navReplay' },
+  { to: '/analyze', ico: '◈', labelKey: 'navAnalyze', elevated: true },
+  { to: '/prescribe', ico: '✎', labelKey: 'navPrescribe', elevated: true },
+  { to: '/practices', ico: '☸', labelKey: 'navPractices', admin: true },
+  { to: '/users', ico: '👥', labelKey: 'navUsers', admin: true },
 ];
 
 const visibleNav = computed(() => navItems.filter((i) => {
@@ -40,7 +43,7 @@ async function submitLogin() {
     await login(form.username.trim(), form.password);
     form.password = '';
   } catch (e) {
-    loginError.value = e.status === 401 ? 'Invalid username or password.' : (e.message || 'Login failed.');
+    loginError.value = e.message || t('loginFailed');
   } finally {
     submitting.value = false;
   }
@@ -54,18 +57,25 @@ onMounted(loadAuth);
 </script>
 
 <template>
+  <!-- ─ Language switcher — fixed top-right, above everything (login screen
+       included) so it's reachable before and after auth. ─ -->
+  <div class="lang-switcher">
+    <button type="button" class="lang-btn" :class="{ 'lang-btn--active': lang === 'en' }" @click="setLang('en')">ENG</button>
+    <button type="button" class="lang-btn" :class="{ 'lang-btn--active': lang === 'gu' }" @click="setLang('gu')">ગુજ</button>
+  </div>
+
   <!-- ─ Loading auth ─ -->
-  <div v-if="!auth.loaded" class="auth-splash">Loading…</div>
+  <div v-if="!auth.loaded" class="auth-splash">{{ t('loading') }}</div>
 
   <!-- ─ Login gate ─ -->
   <div v-else-if="!auth.user" class="auth-gate">
     <form class="auth-card" @submit.prevent="submitLogin">
-      <div class="auth-brand">EEG Control Hub</div>
-      <p class="auth-tagline">Sign in to continue</p>
-      <input v-model="form.username" class="auth-input" type="text" placeholder="Username" autocomplete="username" autofocus />
-      <input v-model="form.password" class="auth-input" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="auth-brand">{{ t('brandName') }}</div>
+      <p class="auth-tagline">{{ t('signIn') }}</p>
+      <input v-model="form.username" class="auth-input" type="text" :placeholder="t('username')" autocomplete="username" autofocus />
+      <input v-model="form.password" class="auth-input" type="password" :placeholder="t('password')" autocomplete="current-password" />
       <div v-if="loginError" class="auth-error">{{ loginError }}</div>
-      <button class="auth-submit" type="submit" :disabled="submitting">{{ submitting ? 'Signing in…' : 'Sign in' }}</button>
+      <button class="auth-submit" type="submit" :disabled="submitting">{{ submitting ? t('signingIn') : t('signIn') }}</button>
     </form>
   </div>
 
@@ -85,8 +95,8 @@ onMounted(loadAuth);
           </svg>
         </div>
         <div class="sidebar__brand-text">
-          <span class="sidebar__brand-name">EEG Control Hub</span>
-          <span class="sidebar__brand-sub">from brainwaves to bliss</span>
+          <span class="sidebar__brand-name">{{ t('brandName') }}</span>
+          <span class="sidebar__brand-sub">{{ t('brandSub') }}</span>
         </div>
       </div>
 
@@ -99,7 +109,7 @@ onMounted(loadAuth);
           active-class="is-active"
         >
           <span class="nav__ico">{{ item.ico }}</span>
-          <span class="nav__label">{{ item.label }}</span>
+          <span class="nav__label">{{ item.labelKey ? t(item.labelKey) : item.label }}</span>
         </router-link>
       </nav>
 
@@ -108,7 +118,7 @@ onMounted(loadAuth);
           <span class="sidebar__user-name">{{ auth.user.username }}</span>
           <span class="sidebar__user-role">{{ auth.user.role }}</span>
         </div>
-        <button class="sidebar__signout" @click="signOut">Sign out</button>
+        <button class="sidebar__signout" @click="signOut">{{ t('signOut') }}</button>
       </div>
     </aside>
 
@@ -123,6 +133,28 @@ onMounted(loadAuth);
 
 <style scoped>
 /* Ported from the legacy .app-shell / .sidebar / .nav rules in style.css. */
+
+/* ─── Language selector — fixed top-right, above everything (login screen
+   included) so it's reachable before and after auth. ─── */
+.lang-switcher {
+  position: fixed; top: 14px; right: 16px; z-index: 1200;
+  display: flex; gap: 2px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  box-shadow: var(--shadow-lg);
+}
+.lang-btn {
+  border: none; background: transparent; cursor: pointer;
+  font-family: var(--font); font-size: 12px; font-weight: 600;
+  padding: 6px 12px; border-radius: calc(var(--radius-sm) - 3px);
+  color: var(--text-mid);
+  transition: background 0.15s, color 0.15s;
+}
+.lang-btn:hover { background: var(--bg-card-2); }
+.lang-btn--active { background: var(--accent); color: #fff; }
+
 .app-shell { display: flex; min-height: 100vh; align-items: stretch; }
 .app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
 /* Consistent breathing room around every routed view (was the legacy .main-content padding). */

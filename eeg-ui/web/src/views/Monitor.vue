@@ -17,16 +17,19 @@ import { isElevated } from '@/lib/auth';
 import { useDriver } from '@/composables/useDriver';
 import ReadingPanel from '@/components/ReadingPanel.vue';
 import { getEegAccess, buildHub, netFetch } from '@/lib/live';
+import { useI18n } from '@/composables/useI18n';
 import {
   DEFAULT_BANDS, WAVE_LEN, DEMO_INTERVAL,
   analyzeLocal, mapAnalyzeResponse, createSmoother, createDemoSource,
 } from '@/lib/analysis';
 
+const { t, tf, translateDataQuality, localizeNumber } = useI18n();
+
 // ── Driver (BLE) ──────────────────────────────────────────────────────────────
 const driver = useDriver();
 const {
   connected, connecting, deviceName, battery, hasPPG, heartRate, spo2,
-  bufferCount, latestSamples, error, COLLECT_N,
+  hrStale, spo2Stale, bufferCount, latestSamples, error, COLLECT_N,
 } = driver;
 
 // ── Backend URL (the .NET analyser — NOT the /api Express backend) ─────────────
@@ -104,19 +107,19 @@ function applyReading(r) {
 }
 
 // ── Metric bar ──
-const epochLabel   = computed(() => reading.value?.epoch ?? '—');
-const qualityLabel = computed(() => reading.value?.data_quality || 'awaiting signal');
-const latencyLabel = computed(() => reading.value?.latency_ms != null ? reading.value.latency_ms.toFixed(1) : '—');
-const bufferLabel  = computed(() => `${bufferCount.value} / ${COLLECT_N}`);
-const modeLabel    = computed(() => mode.value === 'demo' ? 'demo'
+const epochLabel   = computed(() => reading.value?.epoch != null ? localizeNumber(reading.value.epoch) : '—');
+const qualityLabel = computed(() => translateDataQuality(reading.value?.data_quality) || t('awaitingSignal'));
+const latencyLabel = computed(() => reading.value?.latency_ms != null ? localizeNumber(reading.value.latency_ms.toFixed(1)) : '—');
+const bufferLabel  = computed(() => `${localizeNumber(bufferCount.value)} / ${localizeNumber(COLLECT_N)}`);
+const modeLabel    = computed(() => mode.value === 'demo' ? t('demo').toLowerCase()
   : mode.value === 'bluetooth' ? modeHint.value : '—');
 
 const statusInfo = computed(() => {
   if (error.value) return { cls: 'error', text: error.value };
-  if (connecting.value) return { cls: 'waking', text: 'connecting…' };
-  if (connected.value) return { cls: 'bluetooth', text: `${deviceName.value || 'device'} connected` };
-  if (mode.value === 'demo') return { cls: '', text: 'demo mode' };
-  return { cls: '', text: 'disconnected' };
+  if (connecting.value) return { cls: 'waking', text: t('statusConnecting') };
+  if (connected.value) return { cls: 'bluetooth', text: `${deviceName.value || t('deviceFallback')} ${t('statusConnected')}` };
+  if (mode.value === 'demo') return { cls: '', text: t('statusDemoMode') };
+  return { cls: '', text: t('disconnected') };
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -238,7 +241,7 @@ async function goLive() {
       const clientId = selectedClientId.value && selectedClientId.value !== NEW_CLIENT
         ? selectedClientId.value : null;
       const sess = await api('POST', '/sessions/start', {
-        name: 'Live sitting ' + new Date().toLocaleDateString(),
+        name: t('liveSittingPrefix') + new Date().toLocaleDateString(),
         client_id: clientId,
         activity: activity.value.trim() || null,
       });
@@ -261,7 +264,7 @@ async function goLive() {
       hubSessionId = activeSession.value.id;
     } else {
       const sess = await netFetch(shareAccess.backendUrl, shareAccess.token, 'POST', '/sessions',
-        { label: activeSession.value?.name || 'Live sitting' });
+        { label: activeSession.value?.name || t('liveSittingFallback') });
       hubSessionId = sess.id;
     }
     await hubConn.invoke('WatchSession', hubSessionId, null); // owner join — no token
@@ -270,7 +273,7 @@ async function goLive() {
     shareInfo.value = { sessionId: hubSessionId };
     sharing.value = true;
   } catch (err) {
-    shareError.value = err.message || 'Could not go live';
+    shareError.value = err.message || t('shareCouldNotGoLive');
     await teardownShare();
   } finally {
     sharePending.value = false;
@@ -320,7 +323,7 @@ async function toggleConnect() {
   if (connected.value) {
     mode.value = 'bluetooth';
     board.value = deviceName.value || 'BLE headband';
-    modeHint.value = backendUrl ? 'BLE → Render' : 'BLE local';
+    modeHint.value = backendUrl ? t('modeBleRender') : t('modeBleLocal');
   }
 }
 
@@ -377,7 +380,7 @@ async function startSession() {
   let clientId = selectedClientId.value || null;
   if (clientId === NEW_CLIENT) {
     const studentName = newClientName.value.trim();
-    if (!studentName) { alert('Enter the student’s name first.'); return; }
+    if (!studentName) { alert(t('alertEnterStudentName')); return; }
     try {
       const created = await api('POST', '/clients', { name: studentName });
       clients.value = [...clients.value, created];
@@ -385,22 +388,22 @@ async function startSession() {
       clientId = created.id;
       newClientName.value = '';
     } catch (err) {
-      alert('Could not create the student: ' + err.message);
+      alert(t('alertCouldNotCreateStudent') + err.message);
       return;
     }
   }
 
-  const name = prompt('Session name:', 'Session ' + new Date().toLocaleDateString());
+  const name = prompt(t('promptSessionName'), t('sessionDefaultPrefix') + new Date().toLocaleDateString());
   if (name === null) return;
   try {
     const sess = await api('POST', '/sessions/start', {
-      name: name.trim() || 'New Session',
+      name: name.trim() || t('defaultNewSessionName'),
       client_id: clientId,
       activity: activity.value.trim() || null,
     });
     beginSession(sess);
   } catch (err) {
-    alert('Failed to start session: ' + err.message);
+    alert(t('failedToStartSessionPrefix') + err.message);
   }
 }
 
@@ -441,11 +444,11 @@ async function pingBackend() {
     const res = await fetch(backendUrl + '/status', { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
       const data = await res.json();
-      board.value = 'Render backend';
-      modeHint.value = data.model_ready ? 'ready' : 'loading model…';
+      board.value = t('renderBackendLabel');
+      modeHint.value = data.model_ready ? t('statusReady') : t('statusLoadingModelDots');
     }
   } catch {
-    board.value = 'backend waking…';
+    board.value = t('statusBackendWaking');
   }
 }
 
@@ -524,7 +527,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="monitor">
-    <div class="topbar"><div class="topbar__title">Live Monitor</div></div>
+    <div class="topbar"><div class="topbar__title">{{ t('navLiveMonitor') }}</div></div>
 
     <div class="dashboard-grid">
       <!-- ─ Device / Session Command Bar ─ -->
@@ -532,65 +535,64 @@ onBeforeUnmount(() => {
         <div class="command-bar__group command-bar__conn">
           <span class="status-dot" :class="statusInfo.cls"></span>
           <div v-if="connected" class="bt-device-row">
-            <span class="bt-device-name">{{ deviceName || 'device' }}</span>
-            <button class="btn btn-ghost btn-sm" @click="toggleConnect">Disconnect</button>
+            <span class="bt-device-name">{{ deviceName || t('deviceFallback') }}</span>
+            <button class="btn btn-ghost btn-sm" @click="toggleConnect">{{ t('disconnect') }}</button>
           </div>
           <button
             v-else class="btn btn-secondary btn-sm" :disabled="connecting"
             @click="toggleConnect"
           >
-            <span class="btn-icon">📡</span> {{ connecting ? 'Connecting…' : 'Connect' }}
+            <span class="btn-icon">📡</span> {{ connecting ? t('statusConnecting') : t('connect') }}
           </button>
           <button class="btn btn-secondary btn-sm" @click="toggleDemo">
-            <span class="btn-icon">{{ mode === 'demo' ? '⏹' : '▶' }}</span>
-            {{ mode === 'demo' ? 'Stop Demo' : 'Demo' }}
+            {{ mode === 'demo' ? t('stopDemoLabel') : t('demoLabel') }}
           </button>
           <div v-if="battery != null" class="cmd-battery">
-            <span class="cmd-battery__icon">🔋</span><span class="cmd-battery__val">{{ battery }}%</span>
+            <span class="cmd-battery__icon">🔋</span><span class="cmd-battery__val">{{ localizeNumber(battery) }}%</span>
           </div>
         </div>
 
         <div class="command-bar__group command-bar__session">
           <button
             v-if="!sharing" class="btn btn-secondary btn-sm" :disabled="sharePending"
-            title="Let your instructor see this sitting live"
+            :title="t('goLiveHint')"
             @click="goLive"
           >
-            <span class="btn-icon">📶</span> {{ sharePending ? 'Starting…' : 'Go Live' }}
+            <span class="btn-icon">📶</span> {{ sharePending ? t('goLiveStarting') : t('goLiveLabel') }}
           </button>
           <button v-else class="btn btn-danger btn-sm" @click="stopLive">
-            <span class="btn-icon">⏹</span> Stop Live
+            <span class="btn-icon">⏹</span> {{ t('stopLiveLabel') }}
           </button>
           <!-- Client binding is instructor work; a student's session auto-binds server-side. -->
-          <select v-if="isElevated()" v-model="selectedClientId" class="cmd-client-select" title="Which student is this session for?">
-            <option value="">No client</option>
+          <select v-if="isElevated()" v-model="selectedClientId" class="cmd-client-select" :title="t('clientSelectTitle')">
+            <option value="">{{ t('noClient') }}</option>
             <option v-for="c in clients" :key="c.id" :value="c.id">{{ c.name }}</option>
-            <option :value="NEW_CLIENT">＋ New student…</option>
+            <option :value="NEW_CLIENT">{{ t('newStudentOption') }}</option>
           </select>
           <input
             v-if="isElevated() && selectedClientId === NEW_CLIENT"
             v-model="newClientName" class="cmd-new-client" type="text"
-            placeholder="Student's name" @keyup.enter="startSession"
+            :placeholder="t('studentNamePlaceholder')" @keyup.enter="startSession"
           />
           <input
             v-if="!activeSession"
             v-model="activity" class="cmd-activity" type="text" list="practice-types"
-            placeholder="Practice (e.g. Dhyāna)" title="What practice is this sitting?"
+            :placeholder="t('practicePlaceholder')" :title="t('practiceTitle')"
             @keyup.enter="startSession"
           />
           <datalist id="practice-types">
             <option v-for="p in practiceTypes" :key="p" :value="p" />
           </datalist>
           <button v-if="!activeSession" class="btn btn-primary btn-sm" @click="startSession">
-            <span class="btn-icon">⏺</span> Start Session
+            <span class="btn-icon">⏺</span> {{ t('startSession') }}
           </button>
           <template v-else>
             <div class="session-timer-row">
               <span class="session-name-display">{{ activeSession.name }}</span>
               <span v-if="activeSession.activity" class="session-activity">{{ activeSession.activity }}</span>
-              <span class="session-timer">{{ fmtTime(sessionElapsed) }}</span>
+              <span class="session-timer">{{ localizeNumber(fmtTime(sessionElapsed)) }}</span>
             </div>
-            <button class="btn btn-danger btn-sm" @click="endSession">End Session</button>
+            <button class="btn btn-danger btn-sm" @click="endSession">{{ t('endSession') }}</button>
           </template>
         </div>
       </div>
@@ -598,50 +600,48 @@ onBeforeUnmount(() => {
       <!-- ─ Live panel ─ -->
       <div v-if="sharing || shareError" class="card share-card">
         <div class="share-head">
-          <span class="card-label">LIVE</span>
-          <span v-if="sharing" class="share-live-dot">● live</span>
+          <span class="card-label">{{ t('liveTag') }}</span>
+          <span v-if="sharing" class="share-live-dot">{{ t('liveDot') }}</span>
         </div>
         <div v-if="shareError" class="share-error">{{ shareError }}</div>
         <template v-if="sharing">
-          <p class="share-hint">
-            Your instructor can see this sitting while you're live. You can stop anytime.
-          </p>
+          <p class="share-hint">{{ t('shareHint') }}</p>
           <div v-if="watchers.length" class="share-watched">
             <span class="share-watched-dot">●</span>
-            being watched by <strong>{{ watcherNames }}</strong>
+            {{ t('shareWatchedByPrefix') }}<strong>{{ watcherNames }}</strong>
           </div>
-          <div v-else class="share-watched muted">no one is watching right now</div>
+          <div v-else class="share-watched muted">{{ t('shareNoWatchers') }}</div>
         </template>
       </div>
 
       <!-- ─ Live Metric Bar ─ -->
       <div class="metric-bar card">
         <div class="metric-item">
-          <span class="metric-label">EPOCH</span>
+          <span class="metric-label">{{ t('metricEpoch') }}</span>
           <span class="metric-value">{{ epochLabel }}</span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">QUALITY</span>
+          <span class="metric-label">{{ t('metricQuality') }}</span>
           <span class="metric-value">{{ qualityLabel }}</span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">LATENCY</span>
+          <span class="metric-label">{{ t('metricLatency') }}</span>
           <span class="metric-value">{{ latencyLabel }} <span class="metric-unit">ms</span></span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">BUFFER</span>
+          <span class="metric-label">{{ t('metricBuffer') }}</span>
           <span class="metric-value">{{ bufferLabel }}</span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">MODE</span>
+          <span class="metric-label">{{ t('metricMode') }}</span>
           <span class="metric-value">{{ modeLabel }}</span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">BOARD</span>
+          <span class="metric-label">{{ t('metricBoard') }}</span>
           <span class="metric-value">{{ board }}</span>
         </div>
         <div class="metric-item">
-          <span class="metric-label">STATUS</span>
+          <span class="metric-label">{{ t('metricStatus') }}</span>
           <div class="status-indicator">
             <span class="status-dot" :class="statusInfo.cls"></span>
             <span class="status-text">{{ statusInfo.text }}</span>
@@ -658,15 +658,16 @@ onBeforeUnmount(() => {
       <ReadingPanel
         :reading="reading" :has-p-p-g="hasPPG"
         :spo2-fallback="spo2" :hr-fallback="heartRate"
+        :hr-stale="mode === 'bluetooth' && hrStale" :spo2-stale="mode === 'bluetooth' && spo2Stale"
       />
 
       <!-- ─ Session Notes ─ -->
       <div class="card session-card">
-        <div class="card-label">SESSION NOTES</div>
+        <div class="card-label">{{ t('sessionNotesTitle') }}</div>
         <div class="session-notes-section">
           <textarea
             v-model="notes" class="session-notes-input" rows="3"
-            placeholder="Notes for this session…" :disabled="!activeSession"
+            :placeholder="t('sessionNotesPlaceholder')" :disabled="!activeSession"
             @input="onNotesInput"
           ></textarea>
         </div>
@@ -675,13 +676,13 @@ onBeforeUnmount(() => {
       <!-- ─ Session History ─ -->
       <div class="card history-card">
         <div class="history-header">
-          <span class="card-label">SESSION HISTORY</span>
+          <span class="card-label">{{ t('sessionHistoryTitle') }}</span>
           <button class="btn btn-ghost btn-sm" @click="historyOpen = !historyOpen">
-            {{ historyOpen ? 'Hide' : 'Show' }}
+            {{ historyOpen ? t('hide') : t('show') }}
           </button>
         </div>
         <div v-show="historyOpen" class="history-list">
-          <div v-if="!history.length" class="history-empty">No sessions yet</div>
+          <div v-if="!history.length" class="history-empty">{{ t('noSessionsYet') }}</div>
           <div v-for="s in history" :key="s.id" class="history-item">
             {{ s.name }} — {{ fmtDate(s.startTime) }}
           </div>

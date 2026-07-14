@@ -29,6 +29,8 @@ const MUSE_PPG_UUIDS = {
 };
 const PPG_SAMPLE_RATE = 64;
 const PPG_WINDOW_SAMPLES = PPG_SAMPLE_RATE * 8; // 8-second window
+const PPG_RECOMPUTE_MS = 1000; // real HR doesn't need updating faster than 1/s
+const PPG_STALE_MS = 8000;     // how long a good reading is shown as "live" before falling back to "last known"
 
 // BrainBit (4-channel dry EEG, 250 Hz). Protocol per the vendor's web SDK.
 const BRAINBIT_SERVICE_UUID = '6e400001-b534-f393-68a9-e50e24dcca9e';
@@ -41,26 +43,129 @@ const BRAINBIT_CMD_STOP   = new Uint8Array([1]);             // stop everything
 const BRAINBIT_CMD_SIGNAL = new Uint8Array([2, 0, 0, 0, 0]); // start signal mode
 
 // ── PPG helpers (heart rate + SpO2) ───────────────────────────────────────────
-/** BPM from PPG IR via threshold peak detection */
+// Ported verbatim from the legacy app.js's validated computeHeartRate() —
+// detrend against a rolling ~1s baseline -> light smoothing -> threshold peak
+// detection with a widened refractory period -> harmonic-doubling correction
+// (a real dicrotic notch sometimes registers as its own peak, producing a
+// bimodal ~2x RR-interval split; the slower cluster is the true rate) ->
+// autocorrelation confirmation (rejects noise that only *looks* periodic
+// because the refractory floor quantizes it into a regular spacing).
+//
+// Tuned and validated against real captured Muse S PPG data and synthetic
+// noise/clean-pulse trials — see the legacy app.js comment above this
+// function for the full validation notes. Do not simplify without re-running
+// that validation; the earlier, simpler version of this function (single
+// global-mean detrend, 0.28s refractory, no doubling/autocorrelation checks)
+// reported false-positive rates on pure noise and mis-tracked the dicrotic
+// notch as a second beat.
+
+/** Detects a bimodal ~2x RR-interval split caused by the dicrotic notch
+ * occasionally registering as its own peak, and returns the true (slower)
+ * period when found. */
+function detectHarmonicDoubling(rrs) {
+  if (rrs.length < 6) return null;
+  const sortedAll = [...rrs].sort((a, b) => a - b);
+  const med = sortedAll[Math.floor(sortedAll.length / 2)];
+  const cleaned = rrs.filter(rr => rr <= med * 2.0);
+  if (cleaned.length < 6) return null;
+
+  const sorted = [...cleaned].sort((a, b) => a - b);
+  const minN = Math.max(4, Math.ceil(0.35 * cleaned.length));
+  const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const cv = (arr, m) => Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length) / m;
+
+  let best = null;
+  for (let i = minN; i <= sorted.length - minN; i++) {
+    const lowCluster = sorted.slice(0, i), highCluster = sorted.slice(i);
+    const lowMean = mean(lowCluster), highMean = mean(highCluster);
+    const ratio = highMean / lowMean;
+    if (ratio < 1.6 || ratio > 2.4) continue; // not a clean ~2x split
+    const lowCv = cv(lowCluster, lowMean), highCv = cv(highCluster, highMean);
+    if (lowCv > 0.25 || highCv > 0.25) continue; // clusters too noisy to trust
+    const combinedCv = (lowCv * lowCluster.length + highCv * highCluster.length) / (lowCluster.length + highCluster.length);
+    if (!best || combinedCv < best.combinedCv) {
+      best = { period: highMean, lowMean, highMean, lowN: lowCluster.length, highN: highCluster.length, combinedCv };
+    }
+  }
+  return best;
+}
+
+/** BPM from PPG IR: detrend -> smooth -> peak-detect -> outlier-reject RR intervals. */
 function computeHeartRate(signal) {
-  if (signal.length < 64) return null;
-  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
-  const ac = signal.map(v => v - mean);
-  const std = Math.sqrt(ac.reduce((s, v) => s + v * v, 0) / ac.length);
+  if (signal.length < PPG_SAMPLE_RATE * 2) return null;
+
+  // Detrend against a ~1s moving-average baseline instead of one global mean
+  // over the whole window — removes slow drift (breathing, slight movement).
+  const baseWin = PPG_SAMPLE_RATE;
+  const ac = new Array(signal.length);
+  let baseSum = 0;
+  for (let i = 0; i < signal.length; i++) {
+    baseSum += signal[i];
+    if (i >= baseWin) baseSum -= signal[i - baseWin];
+    const baseline = baseSum / Math.min(i + 1, baseWin);
+    ac[i] = signal[i] - baseline;
+  }
+  // Light smoothing to knock down high-frequency noise before peak-picking.
+  const sm = new Array(ac.length);
+  for (let i = 0; i < ac.length; i++) {
+    const lo = Math.max(0, i - 1), hi = Math.min(ac.length - 1, i + 1);
+    sm[i] = (ac[lo] + ac[i] + ac[hi]) / 3;
+  }
+
+  const std = Math.sqrt(sm.reduce((s, v) => s + v * v, 0) / sm.length);
   const thr = std * 0.5;
-  // 0.28 s refractory → supports up to ~214 BPM (covers athletic/stress range)
-  const minDist = Math.round(PPG_SAMPLE_RATE * 0.28);
+  // Refractory period between accepted peaks, widened from 0.4s (max ~150bpm)
+  // to ~0.44s (max ~137bpm) — real device captures showed the dicrotic notch
+  // landing 26-32 samples (400-500ms) after the systolic peak often enough to
+  // survive a tighter refractory and get counted as its own beat.
+  const minDist = Math.round(60 * PPG_SAMPLE_RATE / 137);
   const peaks = []; let lastPeak = -minDist;
-  for (let i = 1; i < ac.length - 1; i++) {
-    if (ac[i] > thr && ac[i] > ac[i - 1] && ac[i] > ac[i + 1] && (i - lastPeak) >= minDist) {
+  for (let i = 1; i < sm.length - 1; i++) {
+    if (sm[i] > thr && sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && (i - lastPeak) >= minDist) {
       peaks.push(i); lastPeak = i;
     }
   }
-  if (peaks.length < 2) return null;
+  if (peaks.length < 6) return null; // need >=5 RR intervals before trusting an estimate
+
   const rrs = peaks.slice(1).map((p, i) => p - peaks[i]);
-  const meanRR = rrs.reduce((a, b) => a + b, 0) / rrs.length;
+
+  // Try the harmonic-doubling correction first; otherwise fall back to
+  // median-based outlier rejection.
+  let meanRR;
+  const doubling = detectHarmonicDoubling(rrs);
+  if (doubling) {
+    meanRR = doubling.period;
+  } else {
+    const sortedRr = [...rrs].sort((a, b) => a - b);
+    const medianRr = sortedRr[Math.floor(sortedRr.length / 2)];
+    // Reject any RR interval more than 25% off the median.
+    const kept = rrs.filter(rr => Math.abs(rr - medianRr) / medianRr <= 0.25);
+    if (kept.length < 4) return null;
+
+    meanRR = kept.reduce((a, b) => a + b, 0) / kept.length;
+    // Periodicity gate: reject if the surviving intervals are still too
+    // scattered (coefficient of variation) rather than reporting a number
+    // that isn't really a heartbeat.
+    const rrStd = Math.sqrt(kept.reduce((s, v) => s + (v - meanRR) ** 2, 0) / kept.length);
+    if (rrStd / meanRR > 0.18) return null;
+  }
+
+  // Autocorrelation confirmation — confirms the candidate period actually
+  // corresponds to periodic energy in the signal itself (lag = meanRR); pure
+  // noise satisfies the refractory-spaced peak checks above too easily on
+  // its own, since the refractory floor alone quantizes noise into a
+  // deceptively regular rhythm.
+  const lag = Math.round(meanRR);
+  if (lag < 1 || lag >= sm.length) return null;
+  let acNum = 0, acDen = 0;
+  for (let i = 0; i + lag < sm.length; i++) {
+    acNum += sm[i] * sm[i + lag];
+    acDen += sm[i] * sm[i];
+  }
+  if (acDen <= 0 || acNum / acDen < 0.45) return null;
+
   const hr = (60 * PPG_SAMPLE_RATE) / meanRR;
-  return (hr >= 30 && hr <= 200) ? hr : null;
+  return (hr >= 35 && hr <= 160) ? hr : null;
 }
 
 /** SpO2 % from red/IR ratio-of-ratios: SpO2 ≈ 110 − 25 × R */
@@ -215,8 +320,13 @@ export function useDriver() {
   const hasPPG      = ref(false);
   const battery     = ref(null);   // 0–100 %, or null when unknown/hidden
   const sampleRate  = ref(SAMPLE_RATE);
-  const heartRate   = ref(null);   // BPM (PPG devices only)
-  const spo2        = ref(null);   // % (PPG devices only)
+  const heartRate   = ref(null);   // BPM (PPG devices only) — EMA-smoothed
+  const spo2        = ref(null);   // % (PPG devices only) — EMA-smoothed
+  // Whether the current heartRate/spo2 value is a momentary bad window (PPG_STALE_MS
+  // since the last GOOD reading) rather than a fresh one — the caller keeps showing
+  // the last known number rather than blanking it, just marks it "last known".
+  const hrStale     = ref(true);
+  const spo2Stale   = ref(true);
   const latestSamples = ref([]);   // last completed epoch: array of per-channel µV arrays
   const epoch       = ref(0);      // increments each time an epoch completes
   const bufferCount = ref(0);      // ch0 samples collected toward COLLECT_N
@@ -261,6 +371,20 @@ export function useDriver() {
     if (epochCallback) epochCallback(snapshot, { epoch: epoch.value, sampleRate: sampleRate.value });
   }
 
+  // EMA smoothing + throttle + staleness state for onMusePPG, mirroring the
+  // legacy app.js's hrEma/spo2Ema tracking. A single momentary bad window
+  // (autocorrelation/periodicity gate rejects it, computeHeartRate returns
+  // null) must not blank the displayed number — it just keeps the last good
+  // EMA value on screen, marked "last known" instead of "live", until
+  // PPG_STALE_MS elapses with no good reading at all.
+  let hrEma = null, spo2Ema = null, lastPpgComputeAt = 0;
+  let lastValidHrAt = 0, lastValidSpo2At = 0;
+  function resetPpgSmoothing() {
+    hrEma = null; spo2Ema = null; lastPpgComputeAt = 0;
+    lastValidHrAt = 0; lastValidSpo2At = 0;
+    hrStale.value = true; spo2Stale.value = true;
+  }
+
   // Muse S PPG processing (heart rate + SpO2). Fed via ctx.onPPG.
   function onMusePPG(ev, channel) {
     const data = ev.target.value;
@@ -272,12 +396,25 @@ export function useDriver() {
     }
     if (buf.length > PPG_WINDOW_SAMPLES) buf.splice(0, buf.length - PPG_WINDOW_SAMPLES);
 
-    if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES) {
-      const hr = computeHeartRate(ppgBuf.ir);
-      if (hr != null) heartRate.value = hr;
+    const now = performance.now();
+    if (channel === 'ir' && buf.length >= PPG_WINDOW_SAMPLES && now - lastPpgComputeAt >= PPG_RECOMPUTE_MS) {
+      lastPpgComputeAt = now;
+      const rawHr = computeHeartRate(ppgBuf.ir);
+      if (rawHr != null) {
+        hrEma = hrEma == null ? rawHr : hrEma + 0.3 * (rawHr - hrEma);
+        lastValidHrAt = now;
+      }
+      if (hrEma != null) heartRate.value = hrEma;
+      hrStale.value = hrEma == null || now - lastValidHrAt > PPG_STALE_MS;
+
       if (ppgBuf.red.length >= PPG_WINDOW_SAMPLES) {
-        const s = computeSpO2(ppgBuf.ir, ppgBuf.red);
-        if (s != null) spo2.value = s;
+        const rawSpo2 = computeSpO2(ppgBuf.ir, ppgBuf.red);
+        if (rawSpo2 != null) {
+          spo2Ema = spo2Ema == null ? rawSpo2 : spo2Ema + 0.3 * (rawSpo2 - spo2Ema);
+          lastValidSpo2At = now;
+        }
+        if (spo2Ema != null) spo2.value = spo2Ema;
+        spo2Stale.value = spo2Ema == null || now - lastValidSpo2At > PPG_STALE_MS;
       }
     }
   }
@@ -328,6 +465,7 @@ export function useDriver() {
       for (let i = 0; i < driver.channelCount; i++) bleChannels.push([]);
       ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
       heartRate.value = null; spo2.value = null;
+      resetPpgSmoothing();
       battery.value = null;
       bufferCount.value = 0;
 
@@ -361,6 +499,7 @@ export function useDriver() {
     bleChannels.forEach(ch => { ch.length = 0; });
     ppgBuf.ambient.length = 0; ppgBuf.ir.length = 0; ppgBuf.red.length = 0;
     heartRate.value = null; spo2.value = null;
+    resetPpgSmoothing();
     bufferCount.value = 0;
     status.value = 'disconnected';
   }
@@ -372,7 +511,7 @@ export function useDriver() {
   return {
     // reactive state
     connected, connecting, deviceName, driverId, hasPPG, battery,
-    sampleRate, latestSamples, heartRate, spo2, epoch, bufferCount, status, error,
+    sampleRate, latestSamples, heartRate, spo2, hrStale, spo2Stale, epoch, bufferCount, status, error,
     // constants (useful for buffer progress UI)
     COLLECT_N,
     // methods
