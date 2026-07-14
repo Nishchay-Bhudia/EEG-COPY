@@ -6,10 +6,12 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '@/lib/api';
 import { useI18n } from '@/composables/useI18n';
+import { useToast } from '@/composables/useToast';
 
 const route = useRoute();
 const router = useRouter();
 const { t, tf, localizeNumber } = useI18n();
+const { showToast } = useToast();
 
 // Status metadata → badge label key + CSS class (legacy CLIENT_STATUS map).
 const CLIENT_STATUS = {
@@ -114,8 +116,10 @@ async function addClient() {
   if (!name || !name.trim()) return;
   try {
     await api('POST', '/clients', { name: name.trim() });
+    showToast(t('clientAddedToast'));
     await load();
   } catch (e) {
+    showToast(e.message);
     error.value = e.message;
   }
 }

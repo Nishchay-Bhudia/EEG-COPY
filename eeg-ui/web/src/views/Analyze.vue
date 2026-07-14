@@ -9,6 +9,7 @@
 // instruments.js, whose builders escape any untrusted labels themselves).
 import { ref, computed, onMounted } from 'vue';
 import { api } from '@/lib/api';
+import { isElevated } from '@/lib/auth';
 import {
   VIEWBOX,
   bandRadar,
@@ -32,7 +33,7 @@ function formatDuration(secs) {
 }
 
 // ── reactive state ───────────────────────────────────────────────────────────
-const sessions = ref([]);        // [{ id, name, startTime }]
+const sessions = ref([]);        // [{ id, name, startTime, username? }]
 const selectedId = ref('');      // bound to the <select>
 const summary = ref(null);       // analytics.summary, or null when nothing to show
 const epochs = ref([]);          // /epochs rows (drive the depth meter + export)
@@ -40,6 +41,17 @@ const notes = ref('');           // session notes (read-only display here — ed
 const emptyMessage = ref(t('analyzeEmptyHint'));
 const exporting = ref(false);
 const exportError = ref('');
+
+// Elevated users (co-admin/admin) can browse and search EVERY session, not
+// just their own — mirrors the legacy admin "Sessions" tab (GET /sessions vs
+// GET /sessions/mine). Session Analytics there opened a separate modal; here
+// it's the same instrument grid this view already renders for "my sessions".
+const userSearch = ref('');
+const filteredSessions = computed(() => {
+  if (!isElevated() || !userSearch.value.trim()) return sessions.value;
+  const q = userSearch.value.trim().toLowerCase();
+  return sessions.value.filter((s) => (s.username || '').toLowerCase().includes(q));
+});
 
 // summary != null ⇒ we have epoch data → show the instrument grid.
 const hasData = computed(() => summary.value != null);
@@ -111,7 +123,7 @@ async function exportSession() {
 
 onMounted(async () => {
   try {
-    const rows = await api('GET', '/sessions/mine');
+    const rows = await api('GET', isElevated() ? '/sessions' : '/sessions/mine');
     if (!rows.length) {
       sessions.value = [];
       toEmpty(t('recordSessionFirstHint'));
@@ -128,14 +140,18 @@ onMounted(async () => {
 <template>
   <div class="analyze">
     <header class="analyze__bar">
+      <input
+        v-if="isElevated()" v-model="userSearch" class="cmd-client-select" type="text"
+        :placeholder="t('searchUserPlaceholder')"
+      />
       <select
         class="cmd-client-select"
         :value="selectedId"
         @change="loadSession($event.target.value)"
       >
-        <option v-if="!sessions.length" value="">{{ t('noSessionsOption') }}</option>
-        <option v-for="s in sessions" :key="s.id" :value="String(s.id)">
-          {{ s.name }} — {{ new Date(s.startTime).toLocaleDateString() }}
+        <option v-if="!filteredSessions.length" value="">{{ t('noSessionsOption') }}</option>
+        <option v-for="s in filteredSessions" :key="s.id" :value="String(s.id)">
+          {{ s.username ? s.username + ' · ' : '' }}{{ s.name }} — {{ new Date(s.startTime).toLocaleDateString() }}
         </option>
       </select>
       <span class="analyze__meta">{{ meta }}</span>

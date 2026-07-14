@@ -6,8 +6,11 @@ import { computed, onMounted, reactive, ref } from 'vue';
 import { auth, loadAuth, isElevated, isAdmin, login, logout } from '@/lib/auth';
 import { useI18n } from '@/composables/useI18n';
 import AiBaba from '@/components/AiBaba.vue';
+import Settings from '@/components/Settings.vue';
+import { useToast } from '@/composables/useToast';
 
 const { lang, setLang, t } = useI18n();
+const { message: toastMessage, visible: toastVisible } = useToast();
 
 // Role model: superadmin (admin) creates instructors; instructors (co-admin)
 // admin students; students (user) only sit. Teaching views are instructor-tier;
@@ -115,7 +118,10 @@ onMounted(loadAuth);
       </nav>
 
       <div class="sidebar__footer">
-        <AiBaba />
+        <div class="sidebar__tools">
+          <AiBaba />
+          <Settings />
+        </div>
         <div class="sidebar__user">
           <span class="sidebar__user-name">{{ auth.user.username }}</span>
           <span class="sidebar__user-role">{{ auth.user.role }}</span>
@@ -131,6 +137,8 @@ onMounted(loadAuth);
       </div>
     </div>
   </div>
+
+  <div id="toast" class="toast" :class="{ 'is-show': toastVisible }" role="status" aria-live="polite">{{ toastMessage }}</div>
 </template>
 
 <style scoped>
@@ -178,6 +186,8 @@ onMounted(loadAuth);
 .sidebar__brand-name { font-family: var(--font-serif); font-size: 15px; color: var(--text); letter-spacing: -0.01em; }
 .sidebar__brand-sub { font-size: 10.5px; color: var(--text-muted); font-style: italic; }
 .sidebar__footer { margin-top: auto; padding: 12px 8px 4px; border-top: 1px solid var(--border-light); display: flex; flex-direction: column; gap: 8px; }
+.sidebar__tools { display: flex; align-items: center; gap: 8px; }
+.sidebar__tools :deep(.btn-ai-baba) { flex: 1; }
 .sidebar__user { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .sidebar__user-name { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar__user-role { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }

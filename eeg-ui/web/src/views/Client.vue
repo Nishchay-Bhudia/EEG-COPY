@@ -8,10 +8,12 @@ import { useRoute, useRouter } from 'vue-router';
 import { api } from '@/lib/api';
 import { CLIENT_STATUS, monthsSince, formatDate, formatDuration } from '@/lib/clients';
 import { useI18n } from '@/composables/useI18n';
+import { useToast } from '@/composables/useToast';
 
 const route = useRoute();
 const router = useRouter();
 const { t, tf, localizeNumber } = useI18n();
+const { showToast } = useToast();
 
 const clientId = computed(() => route.query.id || null);
 
@@ -137,8 +139,10 @@ async function editClient() {
   if (!Object.keys(body).length) return;
   try {
     await api('PUT', '/clients/' + clientId.value, body);
+    showToast(t('toastSaved'));
     await load();
   } catch (e) {
+    showToast(e.message);
     error.value = e.message;
   }
 }
