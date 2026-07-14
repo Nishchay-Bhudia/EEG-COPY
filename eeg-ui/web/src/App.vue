@@ -164,8 +164,11 @@ onMounted(loadAuth);
 .app-shell { display: flex; min-height: 100vh; align-items: stretch; }
 .app-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
 /* Consistent breathing room around every routed view (was the legacy .main-content padding). */
-.view-container { padding: 28px 32px 48px; max-width: 1280px; width: 100%; margin: 0 auto; }
-@media (max-width: 640px) { .view-container { padding: 20px 16px 40px; } }
+/* Top padding clears the fixed .lang-switcher (top:14px, ~30px tall) so a
+   view's own top-right controls (e.g. Cohort's "Add client", Analyze's
+   "Export TXT") never render underneath it, regardless of viewport width. */
+.view-container { padding: 56px 32px 48px; max-width: 1280px; width: 100%; margin: 0 auto; }
+@media (max-width: 640px) { .view-container { padding: 52px 16px 40px; } }
 
 .sidebar {
   width: 232px; flex-shrink: 0;

@@ -83,10 +83,10 @@ export function gunaTriangle(g) {
     svg += `<circle cx="${vx}" cy="${vy}" r="4" fill="${AN_GUNA_COLORS[k]}"/>`;
     svg += `<text x="${lx}" y="${ly}" fill="${AN_GUNA_COLORS[k]}" font-size="11" font-weight="600" text-anchor="middle">${esc(t(k))}</text>`;
   }
-  const s = anNum(g.sattva), r = anNum(g.rajas), t = anNum(g.tamas), sum = s + r + t;
+  const s = anNum(g.sattva), r = anNum(g.rajas), tm = anNum(g.tamas), sum = s + r + tm;
   if (sum > 0) {
-    const px = (s * V.sattva[0] + r * V.rajas[0] + t * V.tamas[0]) / sum;
-    const py = (s * V.sattva[1] + r * V.rajas[1] + t * V.tamas[1]) / sum;
+    const px = (s * V.sattva[0] + r * V.rajas[0] + tm * V.tamas[0]) / sum;
+    const py = (s * V.sattva[1] + r * V.rajas[1] + tm * V.tamas[1]) / sum;
     svg += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="7" fill="var(--accent)" stroke="#fff" stroke-width="1.5"/>`;
   } else {
     svg += `<text x="0" y="0" fill="var(--text-muted)" font-size="11" text-anchor="middle">${esc(t('noGunaData'))}</text>`;
