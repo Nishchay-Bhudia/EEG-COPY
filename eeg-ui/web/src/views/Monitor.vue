@@ -35,7 +35,8 @@ const {
 // ── Backend URL (the .NET analyser — NOT the /api Express backend) ─────────────
 // Defaults to the local analyser for local dev; a stale/unreachable remote
 // default here silently degrades every reading to the local FFT fallback (no
-// gunas, no inner-texture). Override via Settings for a remote deployment.
+// gunas, no inner-texture). Override by setting localStorage 'controlhub_url'
+// for a remote deployment (no in-app settings UI).
 const backendUrl = (localStorage.getItem('controlhub_url') || 'http://localhost:5094').replace(/\/$/, '');
 
 // ── Mode / reading state ──────────────────────────────────────────────────────
