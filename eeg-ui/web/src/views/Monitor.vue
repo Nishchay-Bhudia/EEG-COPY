@@ -500,12 +500,35 @@ function drawWave() {
   const ch0 = connected.value ? latestSamples.value?.[0] : null;
   if (ch0 && ch0.length > 1) {
     const len = Math.min(ch0.length, WAVE_LEN);
+    const raw = ch0.slice(ch0.length - len);
+    // Trailing moving-average to tame per-sample noise and blink spikes.
+    const win = 6;
+    const sm = new Array(len);
+    let sum = 0;
+    for (let i = 0; i < len; i++) {
+      sum += raw[i];
+      if (i >= win) sum -= raw[i - win];
+      sm[i] = sum / Math.min(i + 1, win);
+    }
+    // Detrend against the window mean, then auto-scale to the window's own peak.
+    // Raw EEG can ride on a large electrode DC offset — BrainBit streams it
+    // DC-coupled (~-0.13 V), Muse arrives near zero. Without this, the fixed gain
+    // flung the DC-heavy BrainBit trace ~50 canvas-heights off-screen (blank
+    // graph) while every derived figure kept animating (band powers ignore the
+    // 0 Hz bin, PLV is offset-invariant). Subtracting the mean removes the
+    // pedestal; auto-gain to peak makes ~200 µV of real signal fill the panel on
+    // any device. A µV-floor stops a flat/noisy window from being blown up.
+    const mean = sm.reduce((a, b) => a + b, 0) / len;
+    let peak = 0;
+    for (let i = 0; i < len; i++) { const d = Math.abs(sm[i] - mean); if (d > peak) peak = d; }
+    const gain = (H * 0.42) / Math.max(peak, 2e-5); // 2e-5 V ≈ 20 µV floor
     ctx.beginPath();
     ctx.strokeStyle = accent;
     ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
     for (let i = 0; i < len; i++) {
       const x = (i / (len - 1)) * W;
-      const y = cy - ch0[ch0.length - len + i] * H * 400;
+      const y = cy - (sm[i] - mean) * gain;
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
