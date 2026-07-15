@@ -21,6 +21,7 @@ const navItems = [
   { to: '/cohort', ico: '◎', labelKey: 'navCohort', elevated: true },
   { to: '/client', ico: '○', labelKey: 'navClients', elevated: true },
   { to: '/replay', ico: '↺', labelKey: 'navReplay' },
+  { to: '/swara', ico: '🧭', label: 'Swar Calendar' },
   { to: '/analyze', ico: '◈', labelKey: 'navAnalyze', elevated: true },
   { to: '/prescribe', ico: '✎', labelKey: 'navPrescribe', elevated: true },
   { to: '/practices', ico: '☸', labelKey: 'navPractices', admin: true },

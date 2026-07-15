@@ -42,6 +42,11 @@ const routes = [
     component: () => import('@/views/Replay.vue'),
   },
   {
+    path: '/swara',
+    name: 'swara',
+    component: () => import('@/views/Swara.vue'),
+  },
+  {
     path: '/analyze',
     name: 'analyze',
     component: () => import('@/views/Analyze.vue'),
