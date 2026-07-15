@@ -18,6 +18,9 @@ import {
   getTodaysEntry,
   recordBreathCheck,
 } from '@/lib/swaraLog';
+import { useI18n } from '@/composables/useI18n';
+
+const { t } = useI18n();
 
 const MS_PER_DAY = 86400000;
 
@@ -80,8 +83,7 @@ export function useSwara() {
   function requestLocation() {
     if (typeof navigator === 'undefined' || !navigator.geolocation) {
       locationStatus.value = 'unavailable';
-      locationError.value =
-        'This browser does not support location detection. Enter your coordinates manually.';
+      locationError.value = t('swaraLocationUnavailable');
       return;
     }
     locationStatus.value = 'requesting';
@@ -91,7 +93,7 @@ export function useSwara() {
         coords.value = {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude,
-          label: 'Your location',
+          label: t('swaraYourLocation'),
         };
         locationStatus.value = 'granted';
       },
@@ -99,8 +101,8 @@ export function useSwara() {
         locationStatus.value = 'denied';
         locationError.value =
           error.code === error.PERMISSION_DENIED
-            ? 'Location permission was denied. Enter your coordinates manually to continue.'
-            : 'Could not determine your location. Enter your coordinates manually to continue.';
+            ? t('swaraLocationDenied')
+            : t('swaraLocationError');
       },
       { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
     );

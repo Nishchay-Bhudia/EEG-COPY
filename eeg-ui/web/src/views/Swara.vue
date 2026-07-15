@@ -8,22 +8,27 @@
 // card for visual consistency with the rest of the app).
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSwara } from '@/composables/useSwara';
+import { useI18n } from '@/composables/useI18n';
 
 const swara = useSwara();
+const { t, tf, localizeNumber } = useI18n();
 
 // ── Formatting helpers (no date-fns dependency, matching the rest of the app) ──
-function pad2(n) { return String(n).padStart(2, '0'); }
+// Digits routed through localizeNumber(); month/day-of-week names use the
+// browser's own locale formatting (Intl), same non-translated approach the
+// rest of the app takes for Date.toLocaleString()-derived text.
+function pad2(n) { return localizeNumber(String(n).padStart(2, '0')); }
 function fmtHHmm(date) { return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`; }
 function fmtHeaderDate(date) {
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} · ${fmtHHmm(date)}`;
+  const datePart = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${localizeNumber(datePart)} · ${fmtHHmm(date)}`;
 }
 function fmtTimeLeft(ms) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
-  return `${h > 0 ? h + ':' : ''}${pad2(m)}:${pad2(s)}`;
+  return `${h > 0 ? localizeNumber(h) + ':' : ''}${pad2(m)}:${pad2(s)}`;
 }
 
 // ── Live countdown ──
@@ -47,29 +52,29 @@ function submitManualLocation() {
   const latitude = parseFloat(manualLat.value);
   const longitude = parseFloat(manualLon.value);
   if (!isNaN(latitude) && !isNaN(longitude)) {
-    swara.setManualLocation({ latitude, longitude, label: 'Manual entry' });
+    swara.setManualLocation({ latitude, longitude, label: t('swaraManualEntry') });
   }
 }
 
 // ── Current state display ──
 const nostrilLabel = computed(() => {
   const n = swara.state.value?.nostril;
-  return n === 'left' ? 'Left (Ida)' : n === 'right' ? 'Right (Pingala)' : 'Sushumna (Central)';
+  return n === 'left' ? t('swaraLeftIda') : n === 'right' ? t('swaraRightPingala') : t('swaraSushumnaCentral');
 });
 const nostrilNote = computed(() => {
   const n = swara.state.value?.nostril;
-  if (n === 'left') return 'Cooling, lunar energy. Favorable for stable, enduring tasks, arts, and calm interaction.';
-  if (n === 'right') return 'Heating, solar energy. Favorable for active, physical tasks, consumption, and intense exertion.';
-  return 'Transitional energy. Favorable only for meditation and stillness; unfavorable for worldly actions.';
+  if (n === 'left') return t('swaraNoteLeft');
+  if (n === 'right') return t('swaraNoteRight');
+  return t('swaraNoteSushumnaState');
 });
 
 // ── Seasonal note ──
 const SEASON_TEXT = {
-  cold: 'Apas & Prithvi Tattvas linger longer. The breath naturally seeks to ground and warm the body.',
-  'hot-equatorial': 'Agni Tattva is dominant. The system naturally seeks cooling lunar flows.',
-  temperate: 'The elements flow in equilibrium without extreme seasonal dominance.',
+  cold: 'swaraSeasonTextCold',
+  'hot-equatorial': 'swaraSeasonTextHot',
+  temperate: 'swaraSeasonTextTemperate',
 };
-const SEASON_LABEL = { cold: 'Cold / high-latitude', 'hot-equatorial': 'Hot / equatorial', temperate: 'Temperate' };
+const SEASON_LABEL = { cold: 'swaraSeasonCold', 'hot-equatorial': 'swaraSeasonHot', temperate: 'swaraSeasonTemperate' };
 
 // ── Travel guidance ──
 const travelDir = ref(null);
@@ -88,8 +93,8 @@ const timelineItems = computed(() => {
   return arr;
 });
 function isActiveItem(item) {
-  const t = swara.now.value.getTime();
-  return t >= item.start.getTime() && t < item.end.getTime();
+  const nowMs = swara.now.value.getTime();
+  return nowMs >= item.start.getTime() && nowMs < item.end.getTime();
 }
 function isPastItem(item) {
   return swara.now.value.getTime() >= item.end.getTime();
@@ -102,9 +107,9 @@ function isPastItem(item) {
     <div v-if="swara.locationStatus.value === 'idle'" class="view-stub">
       <div class="view-stub__card">
         <div class="swara-gate-icon">🧭</div>
-        <h2>Align with the Sun</h2>
-        <p>The Swar Calendar needs your precise location to anchor its calculations to your local sunrise and lunar phase. Everything is computed locally on your device — no location data is sent anywhere.</p>
-        <button class="btn btn-primary" @click="swara.requestLocation">Calibrate Instrument</button>
+        <h2>{{ t('swaraGateTitle') }}</h2>
+        <p>{{ t('swaraGateDesc') }}</p>
+        <button class="btn btn-primary" @click="swara.requestLocation">{{ t('swaraCalibrateBtn') }}</button>
       </div>
     </div>
 
@@ -112,7 +117,7 @@ function isPastItem(item) {
     <div v-else-if="swara.locationStatus.value === 'requesting'" class="view-stub">
       <div class="view-stub__card">
         <div class="swara-spinner"></div>
-        <h2>Acquiring coordinates…</h2>
+        <h2>{{ t('swaraAcquiring') }}</h2>
       </div>
     </div>
 
@@ -120,18 +125,18 @@ function isPastItem(item) {
     <div v-else-if="swara.locationStatus.value === 'denied' || swara.locationStatus.value === 'unavailable'" class="view-stub">
       <div class="view-stub__card swara-manual-card">
         <div class="swara-gate-icon">📍</div>
-        <h2>Manual Calibration</h2>
-        <p>{{ swara.locationError.value || 'Enter your coordinates to proceed.' }}</p>
+        <h2>{{ t('swaraManualTitle') }}</h2>
+        <p>{{ swara.locationError.value || t('swaraManualDefaultHint') }}</p>
         <form class="swara-manual-form" @submit.prevent="submitManualLocation">
           <label>
-            <span>Latitude</span>
+            <span>{{ t('swaraLatitude') }}</span>
             <input v-model="manualLat" type="number" step="any" required placeholder="e.g. 34.0522" />
           </label>
           <label>
-            <span>Longitude</span>
+            <span>{{ t('swaraLongitude') }}</span>
             <input v-model="manualLon" type="number" step="any" required placeholder="e.g. -118.2437" />
           </label>
-          <button class="btn btn-primary" type="submit">Set Location</button>
+          <button class="btn btn-primary" type="submit">{{ t('swaraSetLocationBtn') }}</button>
         </form>
       </div>
     </div>
@@ -140,7 +145,7 @@ function isPastItem(item) {
     <div v-else-if="!swara.cycle.value || !swara.state.value" class="view-stub">
       <div class="view-stub__card">
         <div class="swara-spinner"></div>
-        <h2>Calibrating cycles…</h2>
+        <h2>{{ t('swaraCalibratingCycles') }}</h2>
       </div>
     </div>
 
@@ -148,9 +153,9 @@ function isPastItem(item) {
     <div v-else class="swara-dashboard">
       <header class="swara-header">
         <div>
-          <h2 class="swara-title">Today's Cycle</h2>
+          <h2 class="swara-title">{{ t('swaraTodaysCycle') }}</h2>
           <p class="swara-location">
-            📍 {{ swara.coords.value?.label || 'Calibrated location' }} · {{ swara.coords.value?.latitude.toFixed(2) }}, {{ swara.coords.value?.longitude.toFixed(2) }}
+            📍 {{ swara.coords.value?.label || t('swaraCalibratedLocation') }} · {{ localizeNumber(swara.coords.value?.latitude.toFixed(2)) }}, {{ localizeNumber(swara.coords.value?.longitude.toFixed(2)) }}
           </p>
         </div>
         <div class="swara-clock">{{ fmtHeaderDate(swara.now.value) }}</div>
@@ -167,12 +172,12 @@ function isPastItem(item) {
                 <span v-else>⚖️</span>
               </div>
               <div class="swara-current-text">
-                <div class="card-label">DOMINANT CHANNEL</div>
+                <div class="card-label">{{ t('swaraDominantChannel') }}</div>
                 <div class="swara-current-name">{{ nostrilLabel }}</div>
                 <p class="swara-current-note">{{ nostrilNote }}</p>
                 <div class="swara-countdown">
                   <span class="swara-countdown-time">{{ fmtTimeLeft(countdownMs) }}</span>
-                  <span class="swara-countdown-label">{{ swara.state.value.inSushumna ? 'until phase starts' : 'until transition' }}</span>
+                  <span class="swara-countdown-label">{{ swara.state.value.inSushumna ? t('swaraUntilPhaseStarts') : t('swaraUntilTransition') }}</span>
                 </div>
               </div>
             </div>
@@ -180,70 +185,70 @@ function isPastItem(item) {
 
           <div class="swara-mini-grid">
             <div class="card">
-              <div class="card-label">LUNAR PHASE</div>
-              <div class="swara-mini-title">{{ swara.cycle.value.tithi.paksha === 'shukla' ? 'Shukla Paksha' : 'Krishna Paksha' }}</div>
-              <div class="swara-mini-sub">Tithi {{ swara.cycle.value.tithi.tithiDay }}</div>
+              <div class="card-label">{{ t('swaraLunarPhase') }}</div>
+              <div class="swara-mini-title">{{ swara.cycle.value.tithi.paksha === 'shukla' ? t('swaraShuklaPaksha') : t('swaraKrishnaPaksha') }}</div>
+              <div class="swara-mini-sub">{{ tf('swaraTithiTemplate', { n: localizeNumber(swara.cycle.value.tithi.tithiDay) }) }}</div>
             </div>
             <div class="card">
-              <div class="card-label">SEASONAL CONTEXT</div>
-              <div class="swara-mini-title">{{ SEASON_LABEL[swara.seasonalBand.value] }}</div>
-              <div class="swara-mini-sub">{{ SEASON_TEXT[swara.seasonalBand.value] }}</div>
+              <div class="card-label">{{ t('swaraSeasonalContext') }}</div>
+              <div class="swara-mini-title">{{ t(SEASON_LABEL[swara.seasonalBand.value]) }}</div>
+              <div class="swara-mini-sub">{{ t(SEASON_TEXT[swara.seasonalBand.value]) }}</div>
             </div>
           </div>
 
           <!-- ─ Breath logger ─ -->
           <div class="card">
             <div class="swara-card-head">
-              <div class="card-label" style="margin-bottom:0">ALIGNMENT CHECK</div>
-              <span class="swara-streak-badge">Streak: {{ swara.mismatchStreak.value }} {{ swara.mismatchStreak.value === 1 ? 'day' : 'days' }}</span>
+              <div class="card-label" style="margin-bottom:0">{{ t('swaraAlignmentCheck') }}</div>
+              <span class="swara-streak-badge">{{ tf('swaraStreakTemplate', { n: localizeNumber(swara.mismatchStreak.value), day: swara.mismatchStreak.value === 1 ? t('swaraDaySingular') : t('swaraDayPlural') }) }}</span>
             </div>
 
             <div v-if="swara.mismatchStreak.value >= 3" class="swara-arishta-warning">
               <span class="swara-arishta-icon">⚠️</span>
               <div>
-                <strong>Arishta Warning</strong>
-                <p>Three or more consecutive days of misalignment detected. The scripture warns this indicates energetic disturbance. Consider manual breath-forcing techniques to correct the flow.</p>
+                <strong>{{ t('swaraArishtaTitle') }}</strong>
+                <p>{{ t('swaraArishtaDesc') }}</p>
               </div>
             </div>
 
             <div v-if="swara.todaysEntry.value" class="swara-logged">
               <span class="swara-logged-icon">✓</span>
               <div>
-                <p class="swara-logged-title">Log completed for today</p>
-                <p class="swara-logged-sub">Observed: <strong>{{ swara.todaysEntry.value.reported }}</strong> ({{ swara.todaysEntry.value.match ? 'Aligned' : 'Misaligned' }})</p>
+                <p class="swara-logged-title">{{ t('swaraLogCompleted') }}</p>
+                <p class="swara-logged-sub">{{ tf('swaraObservedTemplate', { nostril: swara.todaysEntry.value.reported === 'left' ? t('swaraLeftWord') : t('swaraRightWord'), status: swara.todaysEntry.value.match ? t('swaraAligned') : t('swaraMisaligned') }) }}</p>
               </div>
             </div>
             <div v-else>
-              <p class="swara-hint">Which nostril is currently flowing more freely? Check now to record your alignment.</p>
+              <p class="swara-hint">{{ t('swaraLogHint') }}</p>
               <div class="swara-log-buttons">
-                <button class="swara-log-btn" :disabled="swara.state.value.nostril === 'sushumna'" @click="swara.logBreathCheck('left')">← Left Flow</button>
-                <button class="swara-log-btn" :disabled="swara.state.value.nostril === 'sushumna'" @click="swara.logBreathCheck('right')">Right Flow →</button>
+                <button class="swara-log-btn" :disabled="swara.state.value.nostril === 'sushumna'" @click="swara.logBreathCheck('left')">{{ t('swaraLeftFlowBtn') }}</button>
+                <button class="swara-log-btn" :disabled="swara.state.value.nostril === 'sushumna'" @click="swara.logBreathCheck('right')">{{ t('swaraRightFlowBtn') }}</button>
               </div>
             </div>
           </div>
 
           <!-- ─ Travel guidance ─ -->
           <div class="card">
-            <div class="card-label">TRAVEL GUIDANCE (DESHA-VICHARA)</div>
-            <p class="swara-hint">Select your departure direction to check alignment.</p>
+            <div class="card-label">{{ t('swaraTravelTitle') }}</div>
+            <p class="swara-hint">{{ t('swaraTravelHint') }}</p>
             <div class="swara-dir-buttons">
               <button
                 v-for="d in DIRECTIONS" :key="d" class="swara-dir-btn"
                 :class="{ 'swara-dir-btn--active': travelDir === d }"
                 @click="travelDir = d"
-              >{{ d }}</button>
+              >{{ t('swaraDir' + d.charAt(0).toUpperCase() + d.slice(1)) }}</button>
             </div>
             <div v-if="travelResult" class="swara-travel-result">
               <div class="swara-travel-row">
-                <span>Required dominance</span>
-                <strong :class="'nostril-text-' + travelResult.favorableNostril">{{ travelResult.favorableNostril }}</strong>
+                <span>{{ t('swaraRequiredDominance') }}</span>
+                <strong :class="'nostril-text-' + travelResult.favorableNostril">{{ travelResult.favorableNostril === 'left' ? t('swaraLeftWord') : t('swaraRightWord') }}</strong>
               </div>
               <div class="swara-travel-row">
-                <span>Is it favorable now?</span>
-                <span :class="travelResult.isFavorableNow ? 'swara-yes' : 'swara-no'">{{ travelResult.isFavorableNow ? 'Yes' : 'No' }}</span>
+                <span>{{ t('swaraFavorableNow') }}</span>
+                <span :class="travelResult.isFavorableNow ? 'swara-yes' : 'swara-no'">{{ travelResult.isFavorableNow ? t('swaraYes') : t('swaraNo') }}</span>
               </div>
               <div v-if="!travelResult.isFavorableNow && travelResult.nextFavorableAt" class="swara-travel-row">
-                <span>Next favorable window</span>
+                <span>{{ t('swaraNextFavorableWindow') }}</span>
                 <span class="swara-mono">{{ fmtHHmm(travelResult.nextFavorableAt) }}</span>
               </div>
             </div>
@@ -254,8 +259,8 @@ function isPastItem(item) {
         <div class="swara-col-side">
           <div class="card swara-timeline-card">
             <div class="swara-timeline-head">
-              <div class="card-label" style="margin-bottom:0">DAILY SCHEDULE</div>
-              <div class="swara-timeline-sub">From sunrise to sunrise</div>
+              <div class="card-label" style="margin-bottom:0">{{ t('swaraDailySchedule') }}</div>
+              <div class="swara-timeline-sub">{{ t('swaraSunriseToSunrise') }}</div>
             </div>
             <div class="swara-timeline-body">
               <div
@@ -266,9 +271,9 @@ function isPastItem(item) {
                 <span class="swara-timeline-time">{{ fmtHHmm(item.start) }}</span>
                 <span class="swara-timeline-dot" :class="item.type === 'block' ? 'nostril-' + item.nostril : 'nostril-sushumna'"></span>
                 <span v-if="item.type === 'block'" class="swara-timeline-label">
-                  {{ item.nostril === 'left' ? '🌙' : '☀️' }} {{ item.nostril }} flow
+                  {{ item.nostril === 'left' ? '🌙' : '☀️' }} {{ tf('swaraFlowTemplate', { nostril: item.nostril === 'left' ? t('swaraLeftWord') : t('swaraRightWord') }) }}
                 </span>
-                <span v-else class="swara-timeline-label swara-timeline-label--sushumna">⚖️ Sushumna</span>
+                <span v-else class="swara-timeline-label swara-timeline-label--sushumna">⚖️ {{ t('swaraSushumnaWord') }}</span>
               </div>
             </div>
           </div>
