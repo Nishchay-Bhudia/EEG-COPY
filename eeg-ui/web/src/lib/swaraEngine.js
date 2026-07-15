@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 
 const MS_PER_DAY = 86400000;
-const SUSHUMNA_MINUTES = 2; // midpoint of the scripture's "1 to 4 minutes"
+const SUSHUMNA_MINUTES = 4; // upper end of the scripture's "1 to 4 minutes" transition window
 const HOUR_BLOCK_MINUTES = 60; // 2.5 ghatis = 60 minutes
 
 function toJulianDay(date) {
